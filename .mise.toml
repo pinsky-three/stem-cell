@@ -1,0 +1,22 @@
+[tools]
+rust = "1.94.1"
+
+[env]
+_.file = ".env"
+PORT = "4200"
+
+[tasks.dev]
+description = "Run the server"
+run = "cargo run -p stem-cell"
+
+[tasks.build]
+description = "Release build (frontend + server)"
+run = "cargo build --release -p stem-cell"
+
+[tasks.check]
+description = "Type-check without building"
+run = "cargo check -p stem-cell"
+
+[tasks.docker]
+description = "Build Docker image"
+run = "docker build -t stem-cell ."

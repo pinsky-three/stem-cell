@@ -1,0 +1,47 @@
+models:
+  - name: "User"
+    fields:
+      - name: "id"
+        type: "uuid"
+        required: true
+      - name: "name"
+        type: "string"
+        required: true
+      - name: "email"
+        type: "string"
+        required: true
+  - name: "Post"
+    fields:
+      - name: "id"
+        type: "uuid"
+        required: true
+      - name: "title"
+        type: "string"
+        required: true
+      - name: "content"
+        type: "string"
+        required: true
+  - name: "Comment"
+    fields:
+      - name: "id"
+        type: "uuid"
+        required: true
+      - name: "content"
+        type: "string"
+        required: true
+
+relationships:
+  - name: "owned_posts"
+    from: "User"
+    to: "Post"
+    type: "one_to_many"
+
+  - name: "comments"
+    from: "Post"
+    to: "Comment"
+    type: "one_to_many"
+
+  - name: "author"
+    from: "Comment"
+    to: "User"
+    type: "one_to_one"

@@ -5,11 +5,24 @@ config:
   backend: "postgres"
 
 entities:
+  - name: "Organization"
+    table: "organizations"
+    id: { name: "id", type: "uuid" }
+    fields:
+      - name: "name"
+        type: "string"
+        required: true
+      - name: "slug"
+        type: "string"
+        required: true
+        unique: true
+      - name: "active"
+        type: "bool"
+        required: true
+
   - name: "User"
     table: "users"
-    id:
-      name: "id"
-      type: "uuid"
+    id: { name: "id", type: "uuid" }
     fields:
       - name: "name"
         type: "string"
@@ -21,19 +34,102 @@ entities:
       - name: "age"
         type: "int"
         required: true
+      - name: "active"
+        type: "bool"
+        required: true
+      - name: "bio"
+        type: "text"
+        required: false
+      - name: "org_id"
+        type: "uuid"
+        required: true
+        references:
+          entity: "Organization"
+          field: "id"
 
-  - name: "Post"
-    table: "posts"
-    id:
-      name: "id"
-      type: "uuid"
+  - name: "Project"
+    table: "projects"
+    id: { name: "id", type: "uuid" }
+    fields:
+      - name: "name"
+        type: "string"
+        required: true
+      - name: "description"
+        type: "text"
+        required: false
+      - name: "budget"
+        type: "float"
+        required: true
+      - name: "active"
+        type: "bool"
+        required: true
+      - name: "org_id"
+        type: "uuid"
+        required: true
+        references:
+          entity: "Organization"
+          field: "id"
+      - name: "owner_id"
+        type: "uuid"
+        required: true
+        references:
+          entity: "User"
+          field: "id"
+
+  - name: "Task"
+    table: "tasks"
+    id: { name: "id", type: "uuid" }
     fields:
       - name: "title"
         type: "string"
         required: true
-      - name: "content"
-        type: "string"
+      - name: "description"
+        type: "text"
+        required: false
+      - name: "priority"
+        type: "int"
         required: true
+      - name: "done"
+        type: "bool"
+        required: true
+      - name: "estimated_hours"
+        type: "float"
+        required: false
+      - name: "project_id"
+        type: "uuid"
+        required: true
+        references:
+          entity: "Project"
+          field: "id"
+      - name: "assignee_id"
+        type: "uuid"
+        required: true
+        references:
+          entity: "User"
+          field: "id"
+
+  - name: "TimeEntry"
+    table: "time_entries"
+    id: { name: "id", type: "uuid" }
+    fields:
+      - name: "description"
+        type: "text"
+        required: false
+      - name: "hours"
+        type: "float"
+        required: true
+      - name: "billable"
+        type: "bool"
+        required: true
+      - name: "rate_cents"
+        type: "bigint"
+        required: false
+      - name: "task_id"
+        type: "uuid"
+        required: true
+        references:
+          entity: "Task"
+          field: "id"
       - name: "user_id"
         type: "uuid"
         required: true
@@ -41,49 +137,83 @@ entities:
           entity: "User"
           field: "id"
 
-  - name: "Comment"
-    table: "comments"
-    id:
-      name: "id"
-      type: "uuid"
-    fields:
-      - name: "content"
-        type: "string"
-        required: true
-      - name: "post_id"
-        type: "uuid"
-        required: true
-        references:
-          entity: "Post"
-          field: "id"
-      - name: "author_id"
-        type: "uuid"
-        required: true
-        references:
-          entity: "User"
-          field: "id"
-
 relations:
-  - name: "owned_posts"
+  # Organization
+  - name: "members"
+    kind: "has_many"
+    source: "Organization"
+    target: "User"
+    foreign_key: "org_id"
+  - name: "projects"
+    kind: "has_many"
+    source: "Organization"
+    target: "Project"
+    foreign_key: "org_id"
+
+  # User
+  - name: "organization"
+    kind: "belongs_to"
+    source: "User"
+    target: "Organization"
+    foreign_key: "org_id"
+  - name: "owned_projects"
     kind: "has_many"
     source: "User"
-    target: "Post"
+    target: "Project"
+    foreign_key: "owner_id"
+  - name: "assigned_tasks"
+    kind: "has_many"
+    source: "User"
+    target: "Task"
+    foreign_key: "assignee_id"
+  - name: "time_entries"
+    kind: "has_many"
+    source: "User"
+    target: "TimeEntry"
     foreign_key: "user_id"
 
-  - name: "comments"
-    kind: "has_many"
-    source: "Post"
-    target: "Comment"
-    foreign_key: "post_id"
-
-  - name: "author"
+  # Project
+  - name: "org"
     kind: "belongs_to"
-    source: "Comment"
+    source: "Project"
+    target: "Organization"
+    foreign_key: "org_id"
+  - name: "owner"
+    kind: "belongs_to"
+    source: "Project"
     target: "User"
-    foreign_key: "author_id"
+    foreign_key: "owner_id"
+  - name: "tasks"
+    kind: "has_many"
+    source: "Project"
+    target: "Task"
+    foreign_key: "project_id"
 
-  - name: "post"
+  # Task
+  - name: "project"
     kind: "belongs_to"
-    source: "Comment"
-    target: "Post"
-    foreign_key: "post_id"
+    source: "Task"
+    target: "Project"
+    foreign_key: "project_id"
+  - name: "assignee"
+    kind: "belongs_to"
+    source: "Task"
+    target: "User"
+    foreign_key: "assignee_id"
+  - name: "entries"
+    kind: "has_many"
+    source: "Task"
+    target: "TimeEntry"
+    foreign_key: "task_id"
+
+  # TimeEntry
+  - name: "task"
+    kind: "belongs_to"
+    source: "TimeEntry"
+    target: "Task"
+    foreign_key: "task_id"
+  - name: "worker"
+    kind: "belongs_to"
+    source: "TimeEntry"
+    target: "User"
+    foreign_key: "user_id"

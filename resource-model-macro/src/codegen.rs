@@ -51,67 +51,55 @@ fn map_sql_type(ty: &str) -> &'static str {
 }
 
 fn generate_migrate(spec: &Spec) -> TokenStream {
-    let mut all_sql: Vec<String> = Vec::new();
+    // Drop in reverse dependency order, create in forward order.
+    // CASCADE handles FK deps during drop.
+    let drop_stmts: Vec<String> = spec
+        .entities
+        .iter()
+        .rev()
+        .map(|e| format!("DROP TABLE IF EXISTS {} CASCADE", e.table))
+        .collect();
 
-    for entity in &spec.entities {
-        let mut cols = Vec::new();
+    let create_stmts: Vec<String> = spec
+        .entities
+        .iter()
+        .map(|entity| {
+            let mut cols = Vec::new();
 
-        cols.push(format!(
-            "{} {} PRIMARY KEY",
-            entity.id.name,
-            map_sql_type(&entity.id.ty)
-        ));
-
-        for f in &entity.fields {
-            let mut col = format!("{} {}", f.name, map_sql_type(&f.ty));
-            if f.required {
-                col.push_str(" NOT NULL");
-            }
-            if f.unique {
-                col.push_str(" UNIQUE");
-            }
-            if let Some(ref refs) = f.references {
-                let target = spec
-                    .entities
-                    .iter()
-                    .find(|e| e.name == refs.entity)
-                    .unwrap();
-                col.push_str(&format!(" REFERENCES {}({})", target.table, refs.field));
-            }
-            cols.push(col);
-        }
-
-        all_sql.push(format!(
-            "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
-            entity.table,
-            cols.join(",\n  ")
-        ));
-
-        // ADD COLUMN IF NOT EXISTS for each field so schema changes are picked up
-        for f in &entity.fields {
-            let mut col_def = map_sql_type(&f.ty).to_string();
-            if f.required {
-                // New NOT NULL columns need a default to backfill existing rows
-                let default = default_for_sql_type(&f.ty);
-                col_def.push_str(&format!(" NOT NULL DEFAULT {default}"));
-            }
-            if f.unique {
-                col_def.push_str(" UNIQUE");
-            }
-            if let Some(ref refs) = f.references {
-                let target = spec
-                    .entities
-                    .iter()
-                    .find(|e| e.name == refs.entity)
-                    .unwrap();
-                col_def.push_str(&format!(" REFERENCES {}({})", target.table, refs.field));
-            }
-            all_sql.push(format!(
-                "ALTER TABLE {} ADD COLUMN IF NOT EXISTS {} {}",
-                entity.table, f.name, col_def
+            cols.push(format!(
+                "{} {} PRIMARY KEY",
+                entity.id.name,
+                map_sql_type(&entity.id.ty)
             ));
-        }
-    }
+
+            for f in &entity.fields {
+                let mut col = format!("{} {}", f.name, map_sql_type(&f.ty));
+                if f.required {
+                    col.push_str(" NOT NULL");
+                }
+                if f.unique {
+                    col.push_str(" UNIQUE");
+                }
+                if let Some(ref refs) = f.references {
+                    let target = spec
+                        .entities
+                        .iter()
+                        .find(|e| e.name == refs.entity)
+                        .unwrap();
+                    col.push_str(&format!(" REFERENCES {}({})", target.table, refs.field));
+                }
+                cols.push(col);
+            }
+
+            format!(
+                "CREATE TABLE {} (\n  {}\n)",
+                entity.table,
+                cols.join(",\n  ")
+            )
+        })
+        .collect();
+
+    let all_sql: Vec<&String> = drop_stmts.iter().chain(create_stmts.iter()).collect();
 
     let exec_calls: Vec<TokenStream> = all_sql
         .iter()
@@ -127,17 +115,6 @@ fn generate_migrate(spec: &Spec) -> TokenStream {
             #(#exec_calls)*
             Ok(())
         }
-    }
-}
-
-fn default_for_sql_type(ty: &str) -> &'static str {
-    match ty {
-        "uuid" => "'00000000-0000-0000-0000-000000000000'",
-        "string" | "text" => "''",
-        "int" | "bigint" => "0",
-        "float" => "0.0",
-        "bool" => "false",
-        _ => unreachable!(),
     }
 }
 

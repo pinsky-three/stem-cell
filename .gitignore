@@ -1,2 +1,6 @@
 /target
+/public
 .env
+.astro
+.DS_Store
+node_modules

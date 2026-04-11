@@ -1,12 +1,13 @@
 [tools]
 rust = "1.94.1"
+node = "22.13.1"
 
 [env]
 _.file = ".env"
 PORT = "4200"
 
 [tasks.dev]
-description = "Run the server"
+description = "Build frontend + run server (PORT=4200)"
 run = "cargo run -p stem-cell"
 
 [tasks.build]
@@ -15,7 +16,17 @@ run = "cargo build --release -p stem-cell"
 
 [tasks.check]
 description = "Type-check without building"
-run = "cargo check -p stem-cell"
+run = "SKIP_FRONTEND=1 cargo check -p stem-cell"
+
+[tasks."frontend:dev"]
+description = "Astro dev server with hot reload"
+dir = "frontend"
+run = "npm run dev"
+
+[tasks."frontend:install"]
+description = "Install frontend dependencies"
+dir = "frontend"
+run = "npm install"
 
 [tasks.docker]
 description = "Build Docker image"

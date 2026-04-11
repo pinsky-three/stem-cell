@@ -2,80 +2,31 @@
 interface Props {
   title: string;
   description?: string;
-  ogTitle?: string;
-  ogDescription?: string;
-  ogImage?: string;
-  ogType?: "website" | "article";
-  canonical?: string;
   noindex?: boolean;
-  jsonLd?: Record<string, unknown>;
 }
 
-const SITE_URL = import.meta.env.PUBLIC_SITE_URL || "https://stemcell.pinsky.studio";
 const SITE_NAME = "Stem Cell";
-const DEFAULT_DESCRIPTION =
-  "Infrastructure layer for intelligent services — by Pinsky Studio.";
-const DEFAULT_OG_IMAGE = `${SITE_URL}/og-default.png`;
+const DEFAULT_DESCRIPTION = "Resource model admin — powered by Stem Cell.";
 
 const {
   title,
   description = DEFAULT_DESCRIPTION,
-  ogTitle,
-  ogDescription,
-  ogImage = DEFAULT_OG_IMAGE,
-  ogType = "website",
-  canonical,
   noindex = false,
-  jsonLd,
 } = Astro.props;
-
-const resolvedCanonical = canonical || new URL(Astro.url.pathname, SITE_URL).href;
-const resolvedOgTitle = ogTitle || title;
-const resolvedOgDescription = ogDescription || description;
 ---
 
 <!doctype html>
-<html lang="es">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-
-    <title>{title}</title>
+    <title>{title} — {SITE_NAME}</title>
     <meta name="description" content={description} />
-    <link rel="canonical" href={resolvedCanonical} />
-
     {noindex && <meta name="robots" content="noindex, nofollow" />}
-
-    <!-- Favicon -->
     <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="apple-touch-icon" href="/favicon.png" />
-
-    <!-- Open Graph (WhatsApp, Telegram, Facebook, LinkedIn) -->
-    <meta property="og:site_name" content={SITE_NAME} />
-    <meta property="og:type" content={ogType} />
-    <meta property="og:title" content={resolvedOgTitle} />
-    <meta property="og:description" content={resolvedOgDescription} />
-    <meta property="og:url" content={resolvedCanonical} />
-    <meta property="og:image" content={ogImage} />
-    <meta property="og:image:width" content="1200" />
-    <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content={`${resolvedOgTitle} — ${SITE_NAME}`} />
-    <meta property="og:locale" content="es_PE" />
-
-    <!-- Twitter Card -->
-    <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content={resolvedOgTitle} />
-    <meta name="twitter:description" content={resolvedOgDescription} />
-    <meta name="twitter:image" content={ogImage} />
-
-    <!-- Theme color for mobile browsers -->
-    <meta name="theme-color" content="#fafafa" />
-
-    {jsonLd && (
-      <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
-    )}
+    <meta name="theme-color" content="#0a0a0b" />
   </head>
-  <body class="min-h-screen bg-neutral-50 text-neutral-700 antialiased">
+  <body class="min-h-screen bg-neutral-950 text-neutral-100 antialiased">
     <slot />
   </body>
 </html>

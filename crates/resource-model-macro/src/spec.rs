@@ -14,6 +14,8 @@ pub struct Spec {
 pub struct Config {
     pub visibility: String,
     pub backend: String,
+    #[serde(default)]
+    pub api: bool,
 }
 
 #[derive(Debug, Deserialize)]

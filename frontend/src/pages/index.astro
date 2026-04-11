@@ -1,22 +1,70 @@
+<!-- @generated from specs/self.yaml — do not edit -->
 ---
 import Base from "../layouts/Base.astro";
 ---
+<Base title="Admin Dashboard" noindex={true}>
+  <div class="mx-auto max-w-6xl px-6 py-12">
+    <div class="flex items-center justify-between">
+      <h1 class="text-3xl font-bold tracking-tight">Admin Dashboard</h1>
+      <a href="/api/docs" class="rounded-lg border border-neutral-700 px-4 py-2 text-sm font-medium text-neutral-300 transition hover:border-indigo-500 hover:text-indigo-400">
+        API Docs
+      </a>
+    </div>
 
-<Base title="Stem Cell — Pinsky Studio">
-  <div class="flex min-h-screen flex-col items-center justify-center px-6">
-    <div class="max-w-xl text-center">
-      <h1 class="text-4xl font-semibold tracking-tight text-neutral-600 sm:text-5xl">
-        Stem Cell
-      </h1>
-      <p class="mt-4 text-lg text-neutral-400">
-        Infrastructure layer for intelligent services.
-      </p>
-      <div class="mt-10 flex items-center justify-center gap-6 text-sm text-neutral-300">
-        <span>&copy; {new Date().getFullYear()} Pinsky Studio</span>
-        <a href="mailto:bregy@minsky.cc" class="underline underline-offset-4 transition hover:text-neutral-500">
-          Contact
-        </a>
-      </div>
+    <div class="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+      <a href="/organizations" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">Organization</h3>
+        <p id="count-organizations" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
+        <p class="mt-1 text-xs text-neutral-500">/organizations</p>
+      </a>
+      <a href="/users" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">User</h3>
+        <p id="count-users" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
+        <p class="mt-1 text-xs text-neutral-500">/users</p>
+      </a>
+      <a href="/projects" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">Project</h3>
+        <p id="count-projects" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
+        <p class="mt-1 text-xs text-neutral-500">/projects</p>
+      </a>
+      <a href="/tasks" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">Task</h3>
+        <p id="count-tasks" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
+        <p class="mt-1 text-xs text-neutral-500">/tasks</p>
+      </a>
+      <a href="/time_entries" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">TimeEntry</h3>
+        <p id="count-time_entries" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
+        <p class="mt-1 text-xs text-neutral-500">/time_entries</p>
+      </a>
     </div>
   </div>
+
+  <script>
+    fetch('/api/organizations').then(r=>r.json()).then(d=>{
+      document.getElementById('count-organizations').textContent=d.length+' records';
+    }).catch(()=>{
+      document.getElementById('count-organizations').textContent='--';
+    });
+    fetch('/api/users').then(r=>r.json()).then(d=>{
+      document.getElementById('count-users').textContent=d.length+' records';
+    }).catch(()=>{
+      document.getElementById('count-users').textContent='--';
+    });
+    fetch('/api/projects').then(r=>r.json()).then(d=>{
+      document.getElementById('count-projects').textContent=d.length+' records';
+    }).catch(()=>{
+      document.getElementById('count-projects').textContent='--';
+    });
+    fetch('/api/tasks').then(r=>r.json()).then(d=>{
+      document.getElementById('count-tasks').textContent=d.length+' records';
+    }).catch(()=>{
+      document.getElementById('count-tasks').textContent='--';
+    });
+    fetch('/api/time_entries').then(r=>r.json()).then(d=>{
+      document.getElementById('count-time_entries').textContent=d.length+' records';
+    }).catch(()=>{
+      document.getElementById('count-time_entries').textContent='--';
+    });
+  </script>
 </Base>

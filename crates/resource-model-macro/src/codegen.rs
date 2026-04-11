@@ -38,6 +38,24 @@ fn map_sql_type(ty: &str) -> &'static str {
     }
 }
 
+/// Safe zero-value DEFAULT clause for each SQL type.
+/// Used in `ALTER TABLE ADD COLUMN ... NOT NULL DEFAULT x` so existing rows
+/// are backfilled and the NOT NULL constraint doesn't fail.
+fn zero_default(ty: &str) -> &'static str {
+    match ty {
+        "uuid" => " DEFAULT '00000000-0000-0000-0000-000000000000'::uuid",
+        "string" | "text" => " DEFAULT ''",
+        "int" => " DEFAULT 0",
+        "bigint" => " DEFAULT 0",
+        "float" => " DEFAULT 0",
+        "bool" => " DEFAULT false",
+        "timestamp" => " DEFAULT now()",
+        "decimal" => " DEFAULT 0",
+        "json" => " DEFAULT '{}'::jsonb",
+        _ => "",
+    }
+}
+
 fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
     for (i, c) in s.chars().enumerate() {
@@ -156,11 +174,14 @@ fn generate_migrate(spec: &Spec, sorted: &[&EntitySpec], soft_delete: bool) -> T
             create_cols.join(",\n  ")
         ));
 
-        // Add each field column (idempotent)
+        // Add each field column (idempotent).
+        // Required fields get a DEFAULT so the ALTER succeeds when the table
+        // already has rows (the default backfills existing NULLs).
         for f in &entity.fields {
             let mut col_def = format!("{} {}", f.name, map_sql_type(&f.ty));
             if f.required {
                 col_def.push_str(" NOT NULL");
+                col_def.push_str(zero_default(&f.ty));
             }
             if f.unique {
                 col_def.push_str(" UNIQUE");

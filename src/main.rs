@@ -37,7 +37,10 @@ async fn main() -> Result<(), sqlx::Error> {
             org_id: org.id,
         })
         .await?;
-    println!("✓ user:    {} (age={}, bio={:?})", alice.name, alice.age, alice.bio);
+    println!(
+        "✓ user:    {} (age={}, bio={:?})",
+        alice.name, alice.age, alice.bio
+    );
 
     // ── Project (float budget, bool, two FKs) ─────────────
     let proj = projects

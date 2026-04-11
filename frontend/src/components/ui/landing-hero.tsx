@@ -18,10 +18,10 @@ export default function LandingHero() {
         <div className="max-w-2xl">
           {/* Urgency badge */}
           <div
-            className="inline-flex items-center gap-2 rounded-full bg-white/[0.06] backdrop-blur-sm px-4 py-1.5 mb-6 border border-white/[0.08]"
+            className="inline-flex items-center gap-2 rounded-full bg-white/6 backdrop-blur-sm px-4 py-1.5 mb-6 border border-white/8"
             style={{ filter: "url(#glass-effect)" }}
           >
-            <div className="absolute top-0 left-2 right-2 h-px bg-gradient-to-r from-transparent via-white/15 to-transparent rounded-full" />
+            <div className="absolute top-0 left-2 right-2 h-px bg-linear-to-r from-transparent via-white/15 to-transparent rounded-full" />
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
@@ -36,7 +36,7 @@ export default function LandingHero() {
             Map your
             <br />
             company's{" "}
-            <span className="bg-gradient-to-r from-indigo-300 via-violet-300 to-purple-300 bg-clip-text text-transparent italic font-light">
+            <span className="bg-linear-to-r from-indigo-300 via-violet-300 to-purple-300 bg-clip-text text-transparent italic font-light">
               AI risk
             </span>
           </h1>
@@ -57,7 +57,7 @@ export default function LandingHero() {
             </a>
             <a
               href="#contact"
-              className="flex items-center gap-2 rounded-full border border-white/15 px-8 py-3 text-sm font-medium text-white/70 transition-all duration-300 hover:bg-white/[0.06] hover:border-white/25 hover:text-white"
+              className="flex items-center gap-2 rounded-full border border-white/15 px-8 py-3 text-sm font-medium text-white/70 transition-all duration-300 hover:bg-white/6 hover:border-white/25 hover:text-white"
             >
               Talk to an advisor
             </a>

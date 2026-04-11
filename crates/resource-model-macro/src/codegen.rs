@@ -206,9 +206,53 @@ fn generate_migrate(spec: &Spec, sorted: &[&EntitySpec], soft_delete: bool) -> T
         })
         .collect();
 
+    // Phase 2: Reconcile — drop columns that are no longer in the spec.
+    // Without this, removing a field from the YAML leaves a NOT NULL column
+    // in the DB that the generated INSERT no longer populates → 422 errors.
+    let reconcile_blocks: Vec<TokenStream> = sorted
+        .iter()
+        .map(|entity| {
+            let table = &entity.table;
+            let mut expected: Vec<&str> = vec![entity.id.name.as_str()];
+            expected.extend(entity.fields.iter().map(|f| f.name.as_str()));
+            expected.push("created_at");
+            expected.push("updated_at");
+            if soft_delete {
+                expected.push("deleted_at");
+            }
+
+            let info_sql = format!(
+                "SELECT column_name::text FROM information_schema.columns \
+                 WHERE table_name = '{}' AND table_schema = 'public'",
+                entity.table
+            );
+
+            quote! {
+                {
+                    let expected: &[&str] = &[#(#expected),*];
+                    let actual: Vec<(String,)> = sqlx::query_as(#info_sql)
+                        .fetch_all(pool)
+                        .await?;
+                    for (col,) in &actual {
+                        if !expected.contains(&col.as_str()) {
+                            let drop_sql = format!(
+                                "ALTER TABLE {} DROP COLUMN IF EXISTS {} CASCADE",
+                                #table, col
+                            );
+                            sqlx::query(&drop_sql).execute(pool).await?;
+                        }
+                    }
+                }
+            }
+        })
+        .collect();
+
     quote! {
         pub async fn migrate(pool: &sqlx::PgPool) -> Result<(), sqlx::Error> {
+            // Phase 1: ensure all spec tables and columns exist (additive)
             #(#exec_calls)*
+            // Phase 2: drop columns no longer in the spec (reconcile)
+            #(#reconcile_blocks)*
             Ok(())
         }
     }

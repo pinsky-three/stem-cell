@@ -279,3 +279,27 @@ systems:
           - { field: "author_id",  from: "comment.author_id" }
 
     result: []
+
+  # ── 6. Purchase a product (contract-mode) ───────────────────
+  # This system is too complex for declarative steps: the macro
+  # generates only the trait, DTOs, and error enum. The actual
+  # implementation is provided by the user (or an LLM agent)
+  # in src/systems/purchase_product.rs.
+  - name: "PurchaseProduct"
+    mode: "contract"
+    description: "Validates buyer, checks stock, processes payment, and creates an order"
+    input:
+      - { name: "buyer_id",             type: "uuid",   required: true  }
+      - { name: "product_id",           type: "uuid",   required: true  }
+      - { name: "quantity",             type: "int",    required: true  }
+      - { name: "payment_method_token", type: "string", required: true  }
+      - { name: "coupon_code",          type: "string", required: false }
+    output:
+      - { name: "order_id",        type: "uuid"   }
+      - { name: "payment_status",  type: "string" }
+      - { name: "total_cents",     type: "bigint" }
+    errors:
+      - "BuyerNotFound"
+      - "ProductNotFound"
+      - "InsufficientStock"
+      - "PaymentFailed(String)"

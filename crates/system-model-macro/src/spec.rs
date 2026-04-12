@@ -36,18 +36,34 @@ pub struct ParamSpec {
     pub ty: String,
 }
 
+// ── System mode ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemMode {
+    #[default]
+    Generated,
+    Contract,
+}
+
 // ── Systems ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SystemDef {
     pub name: String,
-    #[allow(dead_code)]
     pub description: String,
+    #[serde(default)]
+    pub mode: SystemMode,
     pub input: Vec<InputField>,
+    #[serde(default)]
     pub steps: Vec<Step>,
     #[serde(default)]
     pub result: Vec<ResultField>,
+    #[serde(default)]
+    pub output: Vec<OutputField>,
+    #[serde(default)]
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +80,15 @@ pub struct InputField {
 pub struct ResultField {
     pub name: String,
     pub from: String,
+}
+
+/// Typed output field for contract-mode systems (name + type, no binding).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
 }
 
 // ── Steps (internally-tagged enum) ──────────────────────────────────────
@@ -521,6 +546,45 @@ systems:
     }
 
     #[test]
+    fn parse_contract_mode() {
+        let spec = parse(
+            r#"
+version: 1
+systems:
+  - name: "PurchaseProduct"
+    mode: "contract"
+    description: "buy a product"
+    input:
+      - { name: "buyer_id", type: "uuid", required: true }
+    output:
+      - { name: "order_id", type: "uuid" }
+    errors:
+      - "BuyerNotFound"
+      - "PaymentFailed(String)"
+"#,
+        );
+        assert_eq!(spec.systems[0].mode, SystemMode::Contract);
+        assert_eq!(spec.systems[0].output.len(), 1);
+        assert_eq!(spec.systems[0].errors.len(), 2);
+        assert!(spec.systems[0].steps.is_empty());
+    }
+
+    #[test]
+    fn default_mode_is_generated() {
+        let spec = parse(
+            r#"
+version: 1
+systems:
+  - name: "Test"
+    description: "test"
+    input: []
+    steps: []
+"#,
+        );
+        assert_eq!(spec.systems[0].mode, SystemMode::Generated);
+    }
+
+    #[test]
     fn parse_full_systems_yaml() {
         let yaml = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -530,6 +594,6 @@ systems:
         let spec: SystemsSpec = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(spec.version, 1);
         assert_eq!(spec.integrations.len(), 2);
-        assert_eq!(spec.systems.len(), 5);
+        assert_eq!(spec.systems.len(), 6);
     }
 }

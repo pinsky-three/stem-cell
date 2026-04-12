@@ -1,9 +1,8 @@
-resource_model_macro::resource_model_file!("specs/self.yaml");
-system_model_macro::system_model_file!("specs/systems.yaml");
+use stem_cell::system_api;
+use stem_cell::{integrations, migrate, resource_api, systems};
 
 mod auth;
 mod email;
-mod integrations;
 mod migrate_auth;
 
 use std::net::SocketAddr;
@@ -91,7 +90,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let auth_routes = auth::router().with_state(state);
 
     // System endpoints — declarative workflows from systems.yaml
-    let system_routes = system_api::router(pool.clone(), integrations::AppIntegrations);
+    let system_routes = system_api::router(
+        pool.clone(),
+        integrations::AppIntegrations,
+        systems::AppSystems,
+    );
 
     // Health endpoints use PgPool state
     let health_routes = Router::new()

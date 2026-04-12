@@ -127,6 +127,33 @@ fn validate_system(
         }
     }
 
+    match system.mode {
+        SystemMode::Generated => {
+            validate_generated_system(system, integrations, errors, ctx);
+        }
+        SystemMode::Contract => {
+            validate_contract_system(system, errors, ctx);
+        }
+    }
+}
+
+fn validate_generated_system(
+    system: &SystemDef,
+    integrations: &HashMap<&str, HashMap<&str, &OperationSpec>>,
+    errors: &mut Vec<String>,
+    ctx: &str,
+) {
+    if !system.output.is_empty() {
+        errors.push(format!(
+            "{ctx}: generated-mode systems must not have 'output' (use 'result' instead)"
+        ));
+    }
+    if !system.errors.is_empty() {
+        errors.push(format!(
+            "{ctx}: generated-mode systems must not have 'errors'"
+        ));
+    }
+
     let mut bindings: HashSet<String> = HashSet::new();
     bindings.insert("input".into());
 
@@ -145,6 +172,63 @@ fn validate_system(
                 r.name, r.from
             ));
         }
+    }
+}
+
+fn validate_contract_system(
+    system: &SystemDef,
+    errors: &mut Vec<String>,
+    ctx: &str,
+) {
+    if !system.steps.is_empty() {
+        errors.push(format!(
+            "{ctx}: contract-mode systems must not have 'steps'"
+        ));
+    }
+    if !system.result.is_empty() {
+        errors.push(format!(
+            "{ctx}: contract-mode systems must not have 'result' (use 'output' instead)"
+        ));
+    }
+
+    let mut output_names: HashSet<&str> = HashSet::new();
+    for f in &system.output {
+        if !output_names.insert(&f.name) {
+            errors.push(format!("{ctx}: duplicate output field '{}'", f.name));
+        }
+        if !is_safe_identifier(&f.name) {
+            errors.push(format!(
+                "{ctx}: output '{}' must be alphanumeric/underscore",
+                f.name
+            ));
+        }
+        if !VALID_TYPES.contains(&f.ty.as_str()) {
+            errors.push(format!(
+                "{ctx}: output '{}' has unsupported type '{}'",
+                f.name, f.ty
+            ));
+        }
+    }
+
+    for (i, variant) in system.errors.iter().enumerate() {
+        let (name, _) = parse_error_variant(variant);
+        if !is_safe_identifier(&name) {
+            errors.push(format!(
+                "{ctx}: error variant #{} '{}' must be alphanumeric/underscore",
+                i, name
+            ));
+        }
+    }
+}
+
+/// Parse an error variant string like `"NotFound"` or `"PaymentFailed(String)"`.
+/// Returns `(name, has_string_payload)`.
+pub fn parse_error_variant(variant: &str) -> (String, bool) {
+    if let Some(paren) = variant.find('(') {
+        let name = variant[..paren].to_string();
+        (name, true)
+    } else {
+        (variant.to_string(), false)
     }
 }
 
@@ -740,6 +824,78 @@ systems:
 "#;
         let errs = validate(&parse(yaml));
         assert!(errs.iter().any(|e| e.contains("binding.field")));
+    }
+
+    #[test]
+    fn contract_mode_rejects_steps() {
+        let yaml = r#"
+version: 1
+systems:
+  - name: "T"
+    mode: "contract"
+    description: "x"
+    input: []
+    steps:
+      - kind: "guard"
+        check: { field: "x.y", equals: true }
+        error: "fail"
+    output: []
+"#;
+        let errs = validate(&parse(yaml));
+        assert!(errs.iter().any(|e| e.contains("must not have 'steps'")));
+    }
+
+    #[test]
+    fn contract_mode_rejects_result() {
+        let yaml = r#"
+version: 1
+systems:
+  - name: "T"
+    mode: "contract"
+    description: "x"
+    input: []
+    output: []
+    result:
+      - { name: "x", from: "y" }
+"#;
+        let errs = validate(&parse(yaml));
+        assert!(errs.iter().any(|e| e.contains("must not have 'result'")));
+    }
+
+    #[test]
+    fn generated_mode_rejects_output() {
+        let yaml = r#"
+version: 1
+systems:
+  - name: "T"
+    description: "x"
+    input: []
+    steps: []
+    output:
+      - { name: "x", type: "string" }
+"#;
+        let errs = validate(&parse(yaml));
+        assert!(errs.iter().any(|e| e.contains("must not have 'output'")));
+    }
+
+    #[test]
+    fn contract_mode_valid() {
+        let yaml = r#"
+version: 1
+systems:
+  - name: "Buy"
+    mode: "contract"
+    description: "buy"
+    input:
+      - { name: "id", type: "uuid", required: true }
+    output:
+      - { name: "order_id", type: "uuid" }
+    errors:
+      - "NotFound"
+      - "PaymentFailed(String)"
+"#;
+        let errs = validate(&parse(yaml));
+        assert!(errs.is_empty(), "unexpected errors: {errs:?}");
     }
 
     #[test]

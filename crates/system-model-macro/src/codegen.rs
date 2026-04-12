@@ -1,4 +1,5 @@
 use crate::spec::*;
+use crate::validate::parse_error_variant;
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use std::collections::HashMap;
@@ -117,11 +118,22 @@ pub fn generate(spec: &SystemsSpec) -> TokenStream {
     let error_types = generate_error_types();
     let integration_code = generate_all_integrations(spec);
     let event_code = generate_all_events(spec);
-    let system_code: Vec<TokenStream> = spec
+
+    let generated_systems: Vec<TokenStream> = spec
         .systems
         .iter()
+        .filter(|s| s.mode == SystemMode::Generated)
         .map(|s| generate_system(s, spec))
         .collect();
+
+    let contract_systems: Vec<TokenStream> = spec
+        .systems
+        .iter()
+        .filter(|s| s.mode == SystemMode::Contract)
+        .map(generate_contract_system)
+        .collect();
+
+    let contract_registry = generate_systems_registry(spec);
     let router_code = generate_systems_router(spec);
 
     quote! {
@@ -131,9 +143,193 @@ pub fn generate(spec: &SystemsSpec) -> TokenStream {
             #error_types
             #integration_code
             #event_code
-            #(#system_code)*
+            #(#generated_systems)*
+            #(#contract_systems)*
+            #contract_registry
             #router_code
         }
+    }
+}
+
+// ── Contract system codegen ─────────────────────────────────────────────
+
+fn generate_contract_system(system: &SystemDef) -> TokenStream {
+    let name = &system.name;
+    let snake = to_snake_case(name);
+
+    let input_struct = generate_input_struct(system);
+    let output_struct = generate_contract_output_struct(system);
+    let error_enum = generate_contract_error_enum(system);
+    let trait_def = generate_contract_trait(system);
+    let executor_wrapper = generate_contract_executor(system);
+
+    let _snake_ident = format_ident!("{}", snake);
+
+    quote! {
+        #input_struct
+        #output_struct
+        #error_enum
+        #trait_def
+        #executor_wrapper
+    }
+}
+
+fn generate_contract_output_struct(system: &SystemDef) -> TokenStream {
+    let name = format_ident!("{}Output", system.name);
+
+    if system.output.is_empty() {
+        return quote! {
+            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            pub struct #name;
+        };
+    }
+
+    let fields: Vec<TokenStream> = system
+        .output
+        .iter()
+        .map(|f| {
+            let fname = format_ident!("{}", f.name);
+            let ftype = map_type(&f.ty);
+            quote! { pub #fname: #ftype }
+        })
+        .collect();
+
+    quote! {
+        #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+        pub struct #name {
+            #(#fields,)*
+        }
+    }
+}
+
+fn generate_contract_error_enum(system: &SystemDef) -> TokenStream {
+    let enum_name = format_ident!("{}Error", system.name);
+
+    let mut variants = Vec::new();
+    let mut display_arms = Vec::new();
+    let mut from_arms = Vec::new();
+
+    for variant_str in &system.errors {
+        let (name_str, has_payload) = parse_error_variant(variant_str);
+        let variant_ident = format_ident!("{}", name_str);
+
+        if has_payload {
+            variants.push(quote! { #variant_ident(String) });
+            display_arms.push(quote! {
+                Self::#variant_ident(msg) => write!(f, "{}: {msg}", stringify!(#variant_ident))
+            });
+            from_arms.push(quote! {
+                #enum_name::#variant_ident(msg) => SystemError::Domain(
+                    format!("{}: {msg}", stringify!(#variant_ident))
+                )
+            });
+        } else {
+            variants.push(quote! { #variant_ident });
+            display_arms.push(quote! {
+                Self::#variant_ident => write!(f, stringify!(#variant_ident))
+            });
+            from_arms.push(quote! {
+                #enum_name::#variant_ident => SystemError::Domain(
+                    stringify!(#variant_ident).into()
+                )
+            });
+        }
+    }
+
+    // Always include an Internal(String) variant
+    variants.push(quote! { Internal(String) });
+    display_arms.push(quote! {
+        Self::Internal(msg) => write!(f, "internal: {msg}")
+    });
+    from_arms.push(quote! {
+        #enum_name::Internal(msg) => SystemError::Domain(format!("internal: {msg}"))
+    });
+
+    quote! {
+        #[derive(Debug)]
+        pub enum #enum_name {
+            #(#variants,)*
+        }
+
+        impl std::fmt::Display for #enum_name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    #(#display_arms,)*
+                }
+            }
+        }
+
+        impl From<#enum_name> for SystemError {
+            fn from(e: #enum_name) -> Self {
+                match e {
+                    #(#from_arms,)*
+                }
+            }
+        }
+    }
+}
+
+fn generate_contract_trait(system: &SystemDef) -> TokenStream {
+    let trait_name = format_ident!("{}System", system.name);
+    let input_name = format_ident!("{}Input", system.name);
+    let output_name = format_ident!("{}Output", system.name);
+    let error_name = format_ident!("{}Error", system.name);
+
+    quote! {
+        #[async_trait::async_trait]
+        pub trait #trait_name: Send + Sync {
+            async fn execute(
+                &self,
+                pool: &sqlx::PgPool,
+                input: #input_name,
+            ) -> Result<#output_name, #error_name>;
+        }
+    }
+}
+
+fn generate_contract_executor(system: &SystemDef) -> TokenStream {
+    let fn_name = format_ident!("execute_{}", to_snake_case(&system.name));
+    let trait_name = format_ident!("{}System", system.name);
+    let input_name = format_ident!("{}Input", system.name);
+    let output_name = format_ident!("{}Output", system.name);
+
+    quote! {
+        pub async fn #fn_name<S: #trait_name>(
+            pool: &sqlx::PgPool,
+            system: &S,
+            input: #input_name,
+        ) -> Result<#output_name, SystemError> {
+            <S as #trait_name>::execute(system, pool, input)
+                .await
+                .map_err(Into::into)
+        }
+    }
+}
+
+// ── Contract systems registry ───────────────────────────────────────────
+
+fn generate_systems_registry(spec: &SystemsSpec) -> TokenStream {
+    let contract_systems: Vec<&SystemDef> = spec
+        .systems
+        .iter()
+        .filter(|s| s.mode == SystemMode::Contract)
+        .collect();
+
+    if contract_systems.is_empty() {
+        return quote! {};
+    }
+
+    let trait_bounds: Vec<TokenStream> = contract_systems
+        .iter()
+        .map(|s| {
+            let trait_name = format_ident!("{}System", s.name);
+            quote! { #trait_name }
+        })
+        .collect();
+
+    quote! {
+        pub trait SystemsRegistry: #(#trait_bounds)+* + Send + Sync + Clone {}
+        impl<T: #(#trait_bounds)+* + Send + Sync + Clone> SystemsRegistry for T {}
     }
 }
 
@@ -144,11 +340,13 @@ fn generate_systems_router(spec: &SystemsSpec) -> TokenStream {
         return quote! {};
     }
 
-    let has_registry = !spec.integrations.is_empty();
-    let any_system_uses_integrations = has_registry
+    let has_integrations = !spec.integrations.is_empty();
+    let has_contracts = spec.systems.iter().any(|s| s.mode == SystemMode::Contract);
+    let any_uses_integrations = has_integrations
         && spec
             .systems
             .iter()
+            .filter(|s| s.mode == SystemMode::Generated)
             .any(|s| steps_use_integration(&s.steps));
 
     let mut handler_fns = Vec::new();
@@ -159,106 +357,219 @@ fn generate_systems_router(spec: &SystemsSpec) -> TokenStream {
         let handler_name = format_ident!("handle_{}", snake);
         let executor_name = format_ident!("execute_{}", snake);
         let input_type = format_ident!("{}Input", system.name);
-        let result_type = format_ident!("{}Result", system.name);
         let route_path = format!("/api/systems/{}", snake);
 
-        let uses_integrations = has_registry && steps_use_integration(&system.steps);
-        let uses_events = steps_use_events(&system.steps);
+        match system.mode {
+            SystemMode::Generated => {
+                let result_type = format_ident!("{}Result", system.name);
+                let uses_integrations =
+                    has_integrations && steps_use_integration(&system.steps);
+                let uses_events = steps_use_events(&system.steps);
 
-        let execute_args = {
-            let mut args = vec![quote! { &state.pool }];
-            if uses_integrations {
-                args.push(quote! { &state.integrations });
-            }
-            if uses_events {
-                args.push(quote! { &NoopEventBus });
-            }
-            args.push(quote! { input });
-            args
-        };
+                let execute_args = {
+                    let mut args = vec![quote! { &state.pool }];
+                    if uses_integrations {
+                        args.push(quote! { &state.integrations });
+                    }
+                    if uses_events {
+                        args.push(quote! { &NoopEventBus });
+                    }
+                    args.push(quote! { input });
+                    args
+                };
 
-        if has_registry {
-            handler_fns.push(quote! {
-                async fn #handler_name<I: IntegrationRegistry + 'static>(
-                    axum::extract::State(state): axum::extract::State<SystemsState<I>>,
-                    axum::Json(input): axum::Json<#input_type>,
-                ) -> Result<axum::Json<#result_type>, SystemError> {
-                    let result = #executor_name(#(#execute_args),*).await?;
-                    Ok(axum::Json(result))
-                }
-            });
-            route_registrations.push(quote! {
-                .route(#route_path, axum::routing::post(#handler_name::<I>))
-            });
-        } else {
-            handler_fns.push(quote! {
-                async fn #handler_name(
-                    axum::extract::State(state): axum::extract::State<SystemsState>,
-                    axum::Json(input): axum::Json<#input_type>,
-                ) -> Result<axum::Json<#result_type>, SystemError> {
-                    let result = #executor_name(#(#execute_args),*).await?;
-                    Ok(axum::Json(result))
-                }
-            });
-            route_registrations.push(quote! {
-                .route(#route_path, axum::routing::post(#handler_name))
-            });
+                handler_fns.push(router_handler_fn(
+                    &handler_name,
+                    &input_type,
+                    &result_type,
+                    &executor_name,
+                    &execute_args,
+                    has_integrations,
+                    has_contracts,
+                ));
+                route_registrations.push(
+                    router_route_registration(&route_path, &handler_name, has_integrations, has_contracts),
+                );
+            }
+            SystemMode::Contract => {
+                let output_type = format_ident!("{}Output", system.name);
+                let execute_args = vec![
+                    quote! { &state.pool },
+                    quote! { &state.systems },
+                    quote! { input },
+                ];
+
+                handler_fns.push(router_handler_fn(
+                    &handler_name,
+                    &input_type,
+                    &output_type,
+                    &executor_name,
+                    &execute_args,
+                    has_integrations,
+                    has_contracts,
+                ));
+                route_registrations.push(
+                    router_route_registration(&route_path, &handler_name, has_integrations, has_contracts),
+                );
+            }
         }
     }
 
-    if has_registry {
-        let integrations_field = if any_system_uses_integrations {
-            quote! { pub integrations: I, }
-        } else {
-            quote! { _integrations: std::marker::PhantomData<I>, }
-        };
+    generate_router_scaffold(
+        has_integrations,
+        has_contracts,
+        any_uses_integrations,
+        &handler_fns,
+        &route_registrations,
+    )
+}
 
-        let router_param = if any_system_uses_integrations {
-            quote! { pool: sqlx::PgPool, integrations: I }
-        } else {
-            quote! { pool: sqlx::PgPool }
-        };
+fn router_handler_fn(
+    handler_name: &proc_macro2::Ident,
+    input_type: &proc_macro2::Ident,
+    result_type: &proc_macro2::Ident,
+    executor_name: &proc_macro2::Ident,
+    execute_args: &[TokenStream],
+    has_integrations: bool,
+    has_contracts: bool,
+) -> TokenStream {
+    let generics = router_generics(has_integrations, has_contracts);
+    let state_type = router_state_type(has_integrations, has_contracts);
 
-        let state_init = if any_system_uses_integrations {
-            quote! { SystemsState { pool, integrations } }
-        } else {
-            quote! { SystemsState { pool, _integrations: std::marker::PhantomData } }
-        };
-
-        quote! {
-            #[derive(Clone)]
-            pub struct SystemsState<I: IntegrationRegistry> {
-                pub pool: sqlx::PgPool,
-                #integrations_field
-            }
-
-            pub fn router<I: IntegrationRegistry + Clone + 'static>(
-                #router_param,
-            ) -> axum::Router {
-                let state = #state_init;
-                axum::Router::new()
-                    #(#route_registrations)*
-                    .with_state(state)
-            }
-
-            #(#handler_fns)*
+    quote! {
+        async fn #handler_name #generics (
+            axum::extract::State(state): axum::extract::State<#state_type>,
+            axum::Json(input): axum::Json<#input_type>,
+        ) -> Result<axum::Json<#result_type>, SystemError> {
+            let result = #executor_name(#(#execute_args),*).await?;
+            Ok(axum::Json(result))
         }
-    } else {
-        quote! {
-            #[derive(Clone)]
-            pub struct SystemsState {
-                pub pool: sqlx::PgPool,
-            }
+    }
+}
 
-            pub fn router(pool: sqlx::PgPool) -> axum::Router {
-                let state = SystemsState { pool };
-                axum::Router::new()
-                    #(#route_registrations)*
-                    .with_state(state)
-            }
+fn router_route_registration(
+    route_path: &str,
+    handler_name: &proc_macro2::Ident,
+    has_integrations: bool,
+    has_contracts: bool,
+) -> TokenStream {
+    let turbofish = router_turbofish(has_integrations, has_contracts);
+    quote! {
+        .route(#route_path, axum::routing::post(#handler_name #turbofish))
+    }
+}
 
-            #(#handler_fns)*
+fn router_generics(has_integrations: bool, has_contracts: bool) -> TokenStream {
+    match (has_integrations, has_contracts) {
+        (true, true) => quote! { <I: IntegrationRegistry + 'static, S: SystemsRegistry + 'static> },
+        (true, false) => quote! { <I: IntegrationRegistry + 'static> },
+        (false, true) => quote! { <S: SystemsRegistry + 'static> },
+        (false, false) => quote! {},
+    }
+}
+
+fn router_state_type(has_integrations: bool, has_contracts: bool) -> TokenStream {
+    match (has_integrations, has_contracts) {
+        (true, true) => quote! { SystemsState<I, S> },
+        (true, false) => quote! { SystemsState<I> },
+        (false, true) => quote! { SystemsState<S> },
+        (false, false) => quote! { SystemsState },
+    }
+}
+
+fn router_turbofish(has_integrations: bool, has_contracts: bool) -> TokenStream {
+    match (has_integrations, has_contracts) {
+        (true, true) => quote! { ::<I, S> },
+        (true, false) => quote! { ::<I> },
+        (false, true) => quote! { ::<S> },
+        (false, false) => quote! {},
+    }
+}
+
+fn generate_router_scaffold(
+    has_integrations: bool,
+    has_contracts: bool,
+    any_uses_integrations: bool,
+    handler_fns: &[TokenStream],
+    route_registrations: &[TokenStream],
+) -> TokenStream {
+    let (state_generics, state_fields, router_fn_generics, router_params, state_init) =
+        match (has_integrations, has_contracts) {
+            (true, true) => (
+                quote! { <I: IntegrationRegistry, S: SystemsRegistry> },
+                if any_uses_integrations {
+                    quote! { pub pool: sqlx::PgPool, pub integrations: I, pub systems: S, }
+                } else {
+                    quote! { pub pool: sqlx::PgPool, _integrations: std::marker::PhantomData<I>, pub systems: S, }
+                },
+                quote! { <I: IntegrationRegistry + Clone + 'static, S: SystemsRegistry + 'static> },
+                if any_uses_integrations {
+                    quote! { pool: sqlx::PgPool, integrations: I, systems: S }
+                } else {
+                    quote! { pool: sqlx::PgPool, systems: S }
+                },
+                if any_uses_integrations {
+                    quote! { SystemsState { pool, integrations, systems } }
+                } else {
+                    quote! { SystemsState { pool, _integrations: std::marker::PhantomData, systems } }
+                },
+            ),
+            (true, false) => {
+                let int_field = if any_uses_integrations {
+                    quote! { pub integrations: I, }
+                } else {
+                    quote! { _integrations: std::marker::PhantomData<I>, }
+                };
+                let int_param = if any_uses_integrations {
+                    quote! { pool: sqlx::PgPool, integrations: I }
+                } else {
+                    quote! { pool: sqlx::PgPool }
+                };
+                let int_init = if any_uses_integrations {
+                    quote! { SystemsState { pool, integrations } }
+                } else {
+                    quote! { SystemsState { pool, _integrations: std::marker::PhantomData } }
+                };
+                (
+                    quote! { <I: IntegrationRegistry> },
+                    quote! { pub pool: sqlx::PgPool, #int_field },
+                    quote! { <I: IntegrationRegistry + Clone + 'static> },
+                    int_param,
+                    int_init,
+                )
+            }
+            (false, true) => (
+                quote! { <S: SystemsRegistry> },
+                quote! { pub pool: sqlx::PgPool, pub systems: S, },
+                quote! { <S: SystemsRegistry + 'static> },
+                quote! { pool: sqlx::PgPool, systems: S },
+                quote! { SystemsState { pool, systems } },
+            ),
+            (false, false) => (
+                quote! {},
+                quote! { pub pool: sqlx::PgPool, },
+                quote! {},
+                quote! { pool: sqlx::PgPool },
+                quote! { SystemsState { pool } },
+            ),
+        };
+
+    quote! {
+        #[derive(Clone)]
+        pub struct SystemsState #state_generics {
+            #state_fields
         }
+
+        pub fn router #router_fn_generics (
+            #router_params,
+        ) -> axum::Router {
+            let state = #state_init;
+            axum::Router::new()
+                #(#route_registrations)*
+                .with_state(state)
+        }
+
+        #(#handler_fns)*
     }
 }
 
@@ -272,6 +583,7 @@ fn generate_error_types() -> TokenStream {
             GuardFailed(String),
             Database(sqlx::Error),
             Integration(IntegrationError),
+            Domain(String),
         }
 
         impl std::fmt::Display for SystemError {
@@ -281,6 +593,7 @@ fn generate_error_types() -> TokenStream {
                     Self::GuardFailed(m) => write!(f, "guard failed: {m}"),
                     Self::Database(e) => write!(f, "database error: {e}"),
                     Self::Integration(e) => write!(f, "integration error: {}.{}: {}", e.integration, e.operation, e.message),
+                    Self::Domain(m) => write!(f, "domain error: {m}"),
                 }
             }
         }
@@ -298,6 +611,7 @@ fn generate_error_types() -> TokenStream {
                         axum::http::StatusCode::BAD_GATEWAY,
                         format!("{}.{}: {}", e.integration, e.operation, e.message),
                     ),
+                    Self::Domain(m) => (axum::http::StatusCode::UNPROCESSABLE_ENTITY, m.clone()),
                 };
                 (status, axum::Json(serde_json::json!({"error": msg}))).into_response()
             }
@@ -407,7 +721,7 @@ fn generate_all_events(spec: &SystemsSpec) -> TokenStream {
     let mut seen: HashMap<String, Vec<TokenStream>> = HashMap::new();
     let mut event_order: Vec<String> = Vec::new();
 
-    for system in &spec.systems {
+    for system in spec.systems.iter().filter(|s| s.mode == SystemMode::Generated) {
         collect_events_from_steps(&system.steps, &mut seen, &mut event_order);
     }
 

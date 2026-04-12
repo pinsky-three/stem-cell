@@ -3,5 +3,6 @@ resolver = "2"
 members = [
     "crates/resource-model-macro",
     "crates/system-model-macro",
+    "crates/systems-codegen",
     "crates/runtime",
 ]

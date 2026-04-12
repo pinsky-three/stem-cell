@@ -1,16 +1,16 @@
 <!-- @generated from specs/self.yaml — do not edit -->
 ---
-import Base from "../layouts/Base.astro";
+import Base from "../../layouts/Base.astro";
 ---
-<Base title="Sprint | Admin" noindex={true}>
+<Base title="Category | Admin" noindex={true}>
   <div class="mx-auto max-w-7xl px-6 py-12">
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-4">
-        <a href="/" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
-        <h1 class="text-3xl font-bold tracking-tight">Sprint</h1>
+        <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
+        <h1 class="text-3xl font-bold tracking-tight">Category</h1>
       </div>
       <button id="create-btn" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold transition hover:bg-indigo-500">
-        + New sprint
+        + New category
       </button>
     </div>
 
@@ -21,11 +21,8 @@ import Base from "../layouts/Base.astro";
           <tr>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">name</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">goal</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">sprint_number</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">capacity_hours</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">active</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">project_id</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">color</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">org_id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">actions</th>
           </tr>
         </thead>
@@ -37,21 +34,13 @@ import Base from "../layouts/Base.astro";
   <!-- Form dialog -->
   <dialog id="form-dialog" class="rounded-xl border border-neutral-700 bg-neutral-900 p-0 text-neutral-100 shadow-2xl backdrop:bg-black/60">
     <form id="entity-form" method="dialog" class="flex flex-col gap-4 p-6" style="min-width:380px">
-      <h2 id="form-title" class="text-lg font-bold">New sprint</h2>
+      <h2 id="form-title" class="text-lg font-bold">New category</h2>
       <div class="flex flex-col gap-3">
         <input type="text" name="name" placeholder="name"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
-        <textarea name="goal" placeholder="goal" rows="2"
-              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"></textarea>
-        <input type="number" name="sprint_number" placeholder="sprint_number" step="1"
+        <input type="text" name="color" placeholder="color"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
-        <input type="number" name="capacity_hours" placeholder="capacity_hours" step="any"
-              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-        <label class="flex items-center gap-2 text-sm">
-              <input type="checkbox" name="active" class="rounded border-neutral-600 bg-neutral-800 text-indigo-500 focus:ring-indigo-500" />
-              active
-            </label>
-        <input type="text" name="project_id" placeholder="project_id (UUID)"
+        <input type="text" name="org_id" placeholder="org_id (UUID)"
               pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
       </div>
@@ -72,7 +61,7 @@ import Base from "../layouts/Base.astro";
   </dialog>
 
   <script>
-    const API = '/api/sprints';
+    const API = '/api/categories';
     const dialog = document.getElementById('form-dialog');
     const form = document.getElementById('entity-form');
     const relDialog = document.getElementById('rel-dialog');
@@ -82,15 +71,12 @@ import Base from "../layouts/Base.astro";
       return `<tr class="transition hover:bg-neutral-900/30">` +
         `<td class="px-4 py-3 font-mono text-xs text-neutral-500">${r.id.substring(0,8)}...</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.name??'—'}</td>`+
-        `<td class="px-4 py-3 text-sm text-neutral-300">${r.goal??'—'}</td>`+
-        `<td class="px-4 py-3 text-sm text-neutral-300">${r.sprint_number??'—'}</td>`+
-        `<td class="px-4 py-3 text-sm text-neutral-300">${r.capacity_hours??'—'}</td>`+
-        `<td class="px-4 py-3 text-sm">${r.active?'<span class="text-green-400">yes</span>':'<span class="text-red-400">no</span>'}</td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/projects" class="text-indigo-400 hover:underline">${r.project_id?r.project_id.substring(0,8)+'...':'—'}</a></td>` +
+        `<td class="px-4 py-3 text-sm text-neutral-300">${r.color??'—'}</td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/organizations" class="text-indigo-400 hover:underline">${r.org_id?r.org_id.substring(0,8)+'...':'—'}</a></td>` +
         `<td class="px-4 py-3 text-sm flex gap-3">
           <button onclick="editItem('${r.id}')" class="text-indigo-400 hover:underline">edit</button>
           <button onclick="deleteItem('${r.id}')" class="text-red-400 hover:underline">del</button>
-          <button onclick="showRelation('${r.id}','tasks')" class="text-indigo-400 hover:underline">tasks</button>
+          
         </td></tr>`;
     }
 
@@ -103,7 +89,7 @@ import Base from "../layouts/Base.astro";
     document.getElementById('create-btn').addEventListener('click', () => {
       editingId = null;
       form.reset();
-      document.getElementById('form-title').textContent = 'New sprint';
+      document.getElementById('form-title').textContent = 'New category';
       dialog.showModal();
     });
 
@@ -113,11 +99,8 @@ import Base from "../layouts/Base.astro";
       e.preventDefault();
       const body = {
         name: form.elements['name'].value,
-        goal: form.elements['goal'].value || null,
-        sprint_number: form.elements['sprint_number'].value ? Number(form.elements['sprint_number'].value) : null,
-        capacity_hours: form.elements['capacity_hours'].value ? parseFloat(form.elements['capacity_hours'].value) : null,
-        active: form.elements['active'].checked,
-        project_id: form.elements['project_id'].value
+        color: form.elements['color'].value,
+        org_id: form.elements['org_id'].value
       };
       const url = editingId ? `${API}/${editingId}` : API;
       const method = editingId ? 'PUT' : 'POST';
@@ -134,18 +117,15 @@ import Base from "../layouts/Base.astro";
       const res = await fetch(`${API}/${id}`);
       const item = await res.json();
       editingId = id;
-      document.getElementById('form-title').textContent = 'Edit sprint';
+      document.getElementById('form-title').textContent = 'Edit category';
       form.elements['name'].value = item.name ?? '';
-      form.elements['goal'].value = item.goal ?? '';
-      form.elements['sprint_number'].value = item.sprint_number ?? '';
-      form.elements['capacity_hours'].value = item.capacity_hours ?? '';
-      form.elements['active'].checked = item.active;
-      form.elements['project_id'].value = item.project_id ?? '';
+      form.elements['color'].value = item.color ?? '';
+      form.elements['org_id'].value = item.org_id ?? '';
       dialog.showModal();
     };
 
     window.deleteItem = async function(id) {
-      if (!confirm('Delete this sprint?')) return;
+      if (!confirm('Delete this category?')) return;
       await fetch(`${API}/${id}`, { method: 'DELETE' });
       loadData();
     };

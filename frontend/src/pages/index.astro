@@ -1,180 +1,62 @@
-<!-- @generated from specs/self.yaml — do not edit -->
 ---
 import Base from "../layouts/Base.astro";
 ---
-<Base title="Admin Dashboard" noindex={true}>
-  <div class="mx-auto max-w-6xl px-6 py-12">
-    <div class="flex items-center justify-between">
-      <h1 class="text-3xl font-bold tracking-tight">Admin Dashboard</h1>
-      <a href="/api/docs" class="rounded-lg border border-neutral-700 px-4 py-2 text-sm font-medium text-neutral-300 transition hover:border-indigo-500 hover:text-indigo-400">
-        API Docs
+<Base title="Home" description="Stem Cell — a resource model runtime for building APIs from YAML specs.">
+  <main class="mx-auto max-w-4xl px-6 py-24 text-center">
+    <div class="inline-flex items-center gap-2 rounded-full border border-neutral-800 bg-neutral-900/60 px-4 py-1.5 text-xs font-medium text-neutral-400">
+      <span class="h-1.5 w-1.5 rounded-full bg-green-400"></span>
+      Open-source runtime
+    </div>
+
+    <h1 class="mt-8 text-5xl font-extrabold tracking-tight sm:text-6xl">
+      <span class="bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">Stem Cell</span>
+    </h1>
+
+    <p class="mx-auto mt-6 max-w-2xl text-lg leading-relaxed text-neutral-400">
+      Define your data model in YAML. Get a full REST API, admin UI, auth, and
+      migrations — instantly. One binary, zero boilerplate.
+    </p>
+
+    <div class="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
+      <a href="/admin" class="rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-600/20 transition hover:bg-indigo-500 hover:shadow-indigo-500/30">
+        Admin Dashboard
+      </a>
+      <a href="/api/docs" class="rounded-xl border border-neutral-700 px-6 py-3 text-sm font-medium text-neutral-300 transition hover:border-neutral-500 hover:text-white">
+        API Documentation
       </a>
     </div>
 
-    <div class="mt-10 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-      <a href="/organizations" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Organization</h3>
-        <p id="count-organizations" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/organizations</p>
-      </a>
-      <a href="/departments" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Department</h3>
-        <p id="count-departments" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/departments</p>
-      </a>
-      <a href="/roles" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Role</h3>
-        <p id="count-roles" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/roles</p>
-      </a>
-      <a href="/users" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">User</h3>
-        <p id="count-users" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/users</p>
-      </a>
-      <a href="/clients" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Client</h3>
-        <p id="count-clients" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/clients</p>
-      </a>
-      <a href="/projects" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Project</h3>
-        <p id="count-projects" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/projects</p>
-      </a>
-      <a href="/milestones" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Milestone</h3>
-        <p id="count-milestones" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/milestones</p>
-      </a>
-      <a href="/sprints" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Sprint</h3>
-        <p id="count-sprints" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/sprints</p>
-      </a>
-      <a href="/categories" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Category</h3>
-        <p id="count-categories" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/categories</p>
-      </a>
-      <a href="/tasks" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Task</h3>
-        <p id="count-tasks" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/tasks</p>
-      </a>
-      <a href="/comments" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Comment</h3>
-        <p id="count-comments" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/comments</p>
-      </a>
-      <a href="/time_entries" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">TimeEntry</h3>
-        <p id="count-time_entries" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/time_entries</p>
-      </a>
-      <a href="/contracts" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Contract</h3>
-        <p id="count-contracts" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/contracts</p>
-      </a>
-      <a href="/invoices" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Invoice</h3>
-        <p id="count-invoices" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/invoices</p>
-      </a>
-      <a href="/line_items" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">LineItem</h3>
-        <p id="count-line_items" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/line_items</p>
-      </a>
-      <a href="/payments" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
-        <h3 class="text-lg font-semibold">Payment</h3>
-        <p id="count-payments" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/payments</p>
-      </a>
-    </div>
-  </div>
-
-  <script>
-    fetch('/api/organizations').then(r=>r.json()).then(d=>{
-      document.getElementById('count-organizations').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-organizations').textContent='--';
-    });
-    fetch('/api/departments').then(r=>r.json()).then(d=>{
-      document.getElementById('count-departments').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-departments').textContent='--';
-    });
-    fetch('/api/roles').then(r=>r.json()).then(d=>{
-      document.getElementById('count-roles').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-roles').textContent='--';
-    });
-    fetch('/api/users').then(r=>r.json()).then(d=>{
-      document.getElementById('count-users').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-users').textContent='--';
-    });
-    fetch('/api/clients').then(r=>r.json()).then(d=>{
-      document.getElementById('count-clients').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-clients').textContent='--';
-    });
-    fetch('/api/projects').then(r=>r.json()).then(d=>{
-      document.getElementById('count-projects').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-projects').textContent='--';
-    });
-    fetch('/api/milestones').then(r=>r.json()).then(d=>{
-      document.getElementById('count-milestones').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-milestones').textContent='--';
-    });
-    fetch('/api/sprints').then(r=>r.json()).then(d=>{
-      document.getElementById('count-sprints').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-sprints').textContent='--';
-    });
-    fetch('/api/categories').then(r=>r.json()).then(d=>{
-      document.getElementById('count-categories').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-categories').textContent='--';
-    });
-    fetch('/api/tasks').then(r=>r.json()).then(d=>{
-      document.getElementById('count-tasks').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-tasks').textContent='--';
-    });
-    fetch('/api/comments').then(r=>r.json()).then(d=>{
-      document.getElementById('count-comments').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-comments').textContent='--';
-    });
-    fetch('/api/time_entries').then(r=>r.json()).then(d=>{
-      document.getElementById('count-time_entries').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-time_entries').textContent='--';
-    });
-    fetch('/api/contracts').then(r=>r.json()).then(d=>{
-      document.getElementById('count-contracts').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-contracts').textContent='--';
-    });
-    fetch('/api/invoices').then(r=>r.json()).then(d=>{
-      document.getElementById('count-invoices').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-invoices').textContent='--';
-    });
-    fetch('/api/line_items').then(r=>r.json()).then(d=>{
-      document.getElementById('count-line_items').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-line_items').textContent='--';
-    });
-    fetch('/api/payments').then(r=>r.json()).then(d=>{
-      document.getElementById('count-payments').textContent=d.length+' records';
-    }).catch(()=>{
-      document.getElementById('count-payments').textContent='--';
-    });
-  </script>
+    <section class="mt-24 grid gap-8 text-left sm:grid-cols-3">
+      <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-6">
+        <div class="mb-3 text-2xl">
+          <svg class="h-7 w-7 text-indigo-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z"/></svg>
+        </div>
+        <h3 class="text-sm font-semibold text-neutral-100">Spec-Driven</h3>
+        <p class="mt-2 text-sm leading-relaxed text-neutral-500">
+          Author your resources, fields, and relations in a single YAML file.
+          The runtime does the rest.
+        </p>
+      </div>
+      <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-6">
+        <div class="mb-3 text-2xl">
+          <svg class="h-7 w-7 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008v-.008z"/></svg>
+        </div>
+        <h3 class="text-sm font-semibold text-neutral-100">Single Binary</h3>
+        <p class="mt-2 text-sm leading-relaxed text-neutral-500">
+          Compiled Rust runtime with built-in Postgres, auth, email, and a
+          static admin frontend. Just add a database.
+        </p>
+      </div>
+      <div class="rounded-xl border border-neutral-800 bg-neutral-900/40 p-6">
+        <div class="mb-3 text-2xl">
+          <svg class="h-7 w-7 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg>
+        </div>
+        <h3 class="text-sm font-semibold text-neutral-100">Auth Built-In</h3>
+        <p class="mt-2 text-sm leading-relaxed text-neutral-500">
+          Email/password, magic links, and OAuth providers — configured in
+          the same spec, protected by default.
+        </p>
+      </div>
+    </section>
+  </main>
 </Base>

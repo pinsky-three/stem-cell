@@ -70,7 +70,7 @@ fn main() {
     }
 
     let spec = load_spec(&spec_path);
-    generate_admin_pages(&spec, &frontend.join("src/pages"));
+    generate_admin_pages(&spec, &frontend.join("src/pages/admin"));
 
     if !frontend.join("node_modules").exists() {
         run("npm", &["install"], &frontend);
@@ -167,10 +167,10 @@ fn generate_dashboard(spec: &Spec, pages_dir: &Path) {
             let table = &e.table;
             let name = &e.name;
             format!(
-                r#"      <a href="/{table}" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+                r#"      <a href="/admin/{table}" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
         <h3 class="text-lg font-semibold">{name}</h3>
         <p id="count-{table}" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
-        <p class="mt-1 text-xs text-neutral-500">/{table}</p>
+        <p class="mt-1 text-xs text-neutral-500">/admin/{table}</p>
       </a>"#
             )
         })
@@ -196,7 +196,7 @@ fn generate_dashboard(spec: &Spec, pages_dir: &Path) {
     let page = format!(
         r#"<!-- @generated from specs/self.yaml — do not edit -->
 ---
-import Base from "../layouts/Base.astro";
+import Base from "../../layouts/Base.astro";
 ---
 <Base title="Admin Dashboard" noindex={{true}}>
   <div class="mx-auto max-w-6xl px-6 py-12">
@@ -259,7 +259,7 @@ fn generate_entity_page(entity: &Entity, relations: &[&Relation], pages_dir: &Pa
                 let ref_entity = f.references.as_ref().unwrap();
                 let ref_table = entity_table_for(&ref_entity.entity);
                 format!(
-                    r#"`<td class="px-4 py-3 font-mono text-xs"><a href="/{ref_table}" class="text-indigo-400 hover:underline">${{r.{n}?r.{n}.substring(0,8)+'...':'—'}}</a></td>`"#
+                    r#"`<td class="px-4 py-3 font-mono text-xs"><a href="/admin/{ref_table}" class="text-indigo-400 hover:underline">${{r.{n}?r.{n}.substring(0,8)+'...':'—'}}</a></td>`"#
                 )
             }
             _ => format!(
@@ -321,13 +321,13 @@ fn generate_entity_page(entity: &Entity, relations: &[&Relation], pages_dir: &Pa
     let page = format!(
         r##"<!-- @generated from specs/self.yaml — do not edit -->
 ---
-import Base from "../layouts/Base.astro";
+import Base from "../../layouts/Base.astro";
 ---
 <Base title="{name} | Admin" noindex={{true}}>
   <div class="mx-auto max-w-7xl px-6 py-12">
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-4">
-        <a href="/" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
+        <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
         <h1 class="text-3xl font-bold tracking-tight">{name}</h1>
       </div>
       <button id="create-btn" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold transition hover:bg-indigo-500">

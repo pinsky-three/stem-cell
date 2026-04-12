@@ -1,12 +1,12 @@
 <!-- @generated from specs/self.yaml — do not edit -->
 ---
-import Base from "../layouts/Base.astro";
+import Base from "../../layouts/Base.astro";
 ---
 <Base title="Client | Admin" noindex={true}>
   <div class="mx-auto max-w-7xl px-6 py-12">
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-4">
-        <a href="/" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
+        <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
         <h1 class="text-3xl font-bold tracking-tight">Client</h1>
       </div>
       <button id="create-btn" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold transition hover:bg-indigo-500">
@@ -102,7 +102,7 @@ import Base from "../layouts/Base.astro";
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.credit_limit_cents??'—'}</td>`+
         `<td class="px-4 py-3 text-sm">${r.active?'<span class="text-green-400">yes</span>':'<span class="text-red-400">no</span>'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.notes??'—'}</td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/organizations" class="text-indigo-400 hover:underline">${r.org_id?r.org_id.substring(0,8)+'...':'—'}</a></td>` +
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/organizations" class="text-indigo-400 hover:underline">${r.org_id?r.org_id.substring(0,8)+'...':'—'}</a></td>` +
         `<td class="px-4 py-3 text-sm flex gap-3">
           <button onclick="editItem('${r.id}')" class="text-indigo-400 hover:underline">edit</button>
           <button onclick="deleteItem('${r.id}')" class="text-red-400 hover:underline">del</button>

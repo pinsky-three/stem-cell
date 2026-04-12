@@ -1,12 +1,12 @@
 <!-- @generated from specs/self.yaml — do not edit -->
 ---
-import Base from "../layouts/Base.astro";
+import Base from "../../layouts/Base.astro";
 ---
 <Base title="Task | Admin" noindex={true}>
   <div class="mx-auto max-w-7xl px-6 py-12">
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-4">
-        <a href="/" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
+        <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
         <h1 class="text-3xl font-bold tracking-tight">Task</h1>
       </div>
       <button id="create-btn" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold transition hover:bg-indigo-500">
@@ -114,12 +114,12 @@ import Base from "../layouts/Base.astro";
         `<td class="px-4 py-3 text-sm">${r.done?'<span class="text-green-400">yes</span>':'<span class="text-red-400">no</span>'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.estimated_hours??'—'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.actual_hours??'—'}</td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/projects" class="text-indigo-400 hover:underline">${r.project_id?r.project_id.substring(0,8)+'...':'—'}</a></td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/sprints" class="text-indigo-400 hover:underline">${r.sprint_id?r.sprint_id.substring(0,8)+'...':'—'}</a></td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/milestones" class="text-indigo-400 hover:underline">${r.milestone_id?r.milestone_id.substring(0,8)+'...':'—'}</a></td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/users" class="text-indigo-400 hover:underline">${r.assignee_id?r.assignee_id.substring(0,8)+'...':'—'}</a></td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/users" class="text-indigo-400 hover:underline">${r.reporter_id?r.reporter_id.substring(0,8)+'...':'—'}</a></td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/categories" class="text-indigo-400 hover:underline">${r.category_id?r.category_id.substring(0,8)+'...':'—'}</a></td>` +
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/projects" class="text-indigo-400 hover:underline">${r.project_id?r.project_id.substring(0,8)+'...':'—'}</a></td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/sprints" class="text-indigo-400 hover:underline">${r.sprint_id?r.sprint_id.substring(0,8)+'...':'—'}</a></td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/milestones" class="text-indigo-400 hover:underline">${r.milestone_id?r.milestone_id.substring(0,8)+'...':'—'}</a></td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/users" class="text-indigo-400 hover:underline">${r.assignee_id?r.assignee_id.substring(0,8)+'...':'—'}</a></td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/users" class="text-indigo-400 hover:underline">${r.reporter_id?r.reporter_id.substring(0,8)+'...':'—'}</a></td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/categories" class="text-indigo-400 hover:underline">${r.category_id?r.category_id.substring(0,8)+'...':'—'}</a></td>` +
         `<td class="px-4 py-3 text-sm flex gap-3">
           <button onclick="editItem('${r.id}')" class="text-indigo-400 hover:underline">edit</button>
           <button onclick="deleteItem('${r.id}')" class="text-red-400 hover:underline">del</button>

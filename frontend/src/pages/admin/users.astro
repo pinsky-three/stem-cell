@@ -1,16 +1,16 @@
 <!-- @generated from specs/self.yaml — do not edit -->
 ---
-import Base from "../layouts/Base.astro";
+import Base from "../../layouts/Base.astro";
 ---
-<Base title="Project | Admin" noindex={true}>
+<Base title="User | Admin" noindex={true}>
   <div class="mx-auto max-w-7xl px-6 py-12">
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-4">
-        <a href="/" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
-        <h1 class="text-3xl font-bold tracking-tight">Project</h1>
+        <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
+        <h1 class="text-3xl font-bold tracking-tight">User</h1>
       </div>
       <button id="create-btn" class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold transition hover:bg-indigo-500">
-        + New project
+        + New user
       </button>
     </div>
 
@@ -21,15 +21,15 @@ import Base from "../layouts/Base.astro";
           <tr>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">name</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">code</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">description</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">budget_cents</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">email</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">title</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">phone</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">hourly_rate</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">active</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">archived</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">bio</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">org_id</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">client_id</th>
-          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">lead_id</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">department_id</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">role_id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">actions</th>
           </tr>
         </thead>
@@ -41,15 +41,15 @@ import Base from "../layouts/Base.astro";
   <!-- Form dialog -->
   <dialog id="form-dialog" class="rounded-xl border border-neutral-700 bg-neutral-900 p-0 text-neutral-100 shadow-2xl backdrop:bg-black/60">
     <form id="entity-form" method="dialog" class="flex flex-col gap-4 p-6" style="min-width:380px">
-      <h2 id="form-title" class="text-lg font-bold">New project</h2>
+      <h2 id="form-title" class="text-lg font-bold">New user</h2>
       <div class="flex flex-col gap-3">
         <input type="text" name="name" placeholder="name"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
-        <input type="text" name="code" placeholder="code"
+        <input type="text" name="email" placeholder="email"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
-        <textarea name="description" placeholder="description" rows="2"
-              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"></textarea>
-        <input type="number" name="budget_cents" placeholder="budget_cents" step="1"
+        <input type="text" name="title" placeholder="title"
+              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+        <input type="text" name="phone" placeholder="phone"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
         <input type="number" name="hourly_rate" placeholder="hourly_rate" step="any"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
@@ -57,19 +57,17 @@ import Base from "../layouts/Base.astro";
               <input type="checkbox" name="active" class="rounded border-neutral-600 bg-neutral-800 text-indigo-500 focus:ring-indigo-500" />
               active
             </label>
-        <label class="flex items-center gap-2 text-sm">
-              <input type="checkbox" name="archived" class="rounded border-neutral-600 bg-neutral-800 text-indigo-500 focus:ring-indigo-500" />
-              archived
-            </label>
+        <textarea name="bio" placeholder="bio" rows="2"
+              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"></textarea>
         <input type="text" name="org_id" placeholder="org_id (UUID)"
               pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
-        <input type="text" name="client_id" placeholder="client_id (UUID)"
+        <input type="text" name="department_id" placeholder="department_id (UUID)"
               pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
-        <input type="text" name="lead_id" placeholder="lead_id (UUID)"
+        <input type="text" name="role_id" placeholder="role_id (UUID)"
               pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
+              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
       </div>
       <div class="flex justify-end gap-3 pt-2">
         <button type="button" id="cancel-btn" class="rounded-lg border border-neutral-700 px-4 py-2 text-sm transition hover:bg-neutral-800">Cancel</button>
@@ -88,7 +86,7 @@ import Base from "../layouts/Base.astro";
   </dialog>
 
   <script>
-    const API = '/api/projects';
+    const API = '/api/users';
     const dialog = document.getElementById('form-dialog');
     const form = document.getElementById('entity-form');
     const relDialog = document.getElementById('rel-dialog');
@@ -98,19 +96,19 @@ import Base from "../layouts/Base.astro";
       return `<tr class="transition hover:bg-neutral-900/30">` +
         `<td class="px-4 py-3 font-mono text-xs text-neutral-500">${r.id.substring(0,8)}...</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.name??'—'}</td>`+
-        `<td class="px-4 py-3 text-sm text-neutral-300">${r.code??'—'}</td>`+
-        `<td class="px-4 py-3 text-sm text-neutral-300">${r.description??'—'}</td>`+
-        `<td class="px-4 py-3 text-sm text-neutral-300">${r.budget_cents??'—'}</td>`+
+        `<td class="px-4 py-3 text-sm text-neutral-300">${r.email??'—'}</td>`+
+        `<td class="px-4 py-3 text-sm text-neutral-300">${r.title??'—'}</td>`+
+        `<td class="px-4 py-3 text-sm text-neutral-300">${r.phone??'—'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.hourly_rate??'—'}</td>`+
         `<td class="px-4 py-3 text-sm">${r.active?'<span class="text-green-400">yes</span>':'<span class="text-red-400">no</span>'}</td>`+
-        `<td class="px-4 py-3 text-sm">${r.archived?'<span class="text-green-400">yes</span>':'<span class="text-red-400">no</span>'}</td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/organizations" class="text-indigo-400 hover:underline">${r.org_id?r.org_id.substring(0,8)+'...':'—'}</a></td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/clients" class="text-indigo-400 hover:underline">${r.client_id?r.client_id.substring(0,8)+'...':'—'}</a></td>`+
-        `<td class="px-4 py-3 font-mono text-xs"><a href="/users" class="text-indigo-400 hover:underline">${r.lead_id?r.lead_id.substring(0,8)+'...':'—'}</a></td>` +
+        `<td class="px-4 py-3 text-sm text-neutral-300">${r.bio??'—'}</td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/organizations" class="text-indigo-400 hover:underline">${r.org_id?r.org_id.substring(0,8)+'...':'—'}</a></td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/departments" class="text-indigo-400 hover:underline">${r.department_id?r.department_id.substring(0,8)+'...':'—'}</a></td>`+
+        `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/roles" class="text-indigo-400 hover:underline">${r.role_id?r.role_id.substring(0,8)+'...':'—'}</a></td>` +
         `<td class="px-4 py-3 text-sm flex gap-3">
           <button onclick="editItem('${r.id}')" class="text-indigo-400 hover:underline">edit</button>
           <button onclick="deleteItem('${r.id}')" class="text-red-400 hover:underline">del</button>
-          <button onclick="showRelation('${r.id}','milestones')" class="text-indigo-400 hover:underline">milestones</button> <button onclick="showRelation('${r.id}','sprints')" class="text-indigo-400 hover:underline">sprints</button> <button onclick="showRelation('${r.id}','tasks')" class="text-indigo-400 hover:underline">tasks</button> <button onclick="showRelation('${r.id}','time_entries')" class="text-indigo-400 hover:underline">time_entries</button>
+          <button onclick="showRelation('${r.id}','led_projects')" class="text-indigo-400 hover:underline">led_projects</button> <button onclick="showRelation('${r.id}','assigned_tasks')" class="text-indigo-400 hover:underline">assigned_tasks</button> <button onclick="showRelation('${r.id}','reported_tasks')" class="text-indigo-400 hover:underline">reported_tasks</button> <button onclick="showRelation('${r.id}','comments')" class="text-indigo-400 hover:underline">comments</button> <button onclick="showRelation('${r.id}','time_entries')" class="text-indigo-400 hover:underline">time_entries</button>
         </td></tr>`;
     }
 
@@ -123,7 +121,7 @@ import Base from "../layouts/Base.astro";
     document.getElementById('create-btn').addEventListener('click', () => {
       editingId = null;
       form.reset();
-      document.getElementById('form-title').textContent = 'New project';
+      document.getElementById('form-title').textContent = 'New user';
       dialog.showModal();
     });
 
@@ -133,15 +131,15 @@ import Base from "../layouts/Base.astro";
       e.preventDefault();
       const body = {
         name: form.elements['name'].value,
-        code: form.elements['code'].value,
-        description: form.elements['description'].value || null,
-        budget_cents: form.elements['budget_cents'].value ? Number(form.elements['budget_cents'].value) : null,
+        email: form.elements['email'].value,
+        title: form.elements['title'].value || null,
+        phone: form.elements['phone'].value || null,
         hourly_rate: form.elements['hourly_rate'].value ? parseFloat(form.elements['hourly_rate'].value) : null,
         active: form.elements['active'].checked,
-        archived: form.elements['archived'].checked,
+        bio: form.elements['bio'].value || null,
         org_id: form.elements['org_id'].value,
-        client_id: form.elements['client_id'].value || null,
-        lead_id: form.elements['lead_id'].value
+        department_id: form.elements['department_id'].value || null,
+        role_id: form.elements['role_id'].value || null
       };
       const url = editingId ? `${API}/${editingId}` : API;
       const method = editingId ? 'PUT' : 'POST';
@@ -158,22 +156,22 @@ import Base from "../layouts/Base.astro";
       const res = await fetch(`${API}/${id}`);
       const item = await res.json();
       editingId = id;
-      document.getElementById('form-title').textContent = 'Edit project';
+      document.getElementById('form-title').textContent = 'Edit user';
       form.elements['name'].value = item.name ?? '';
-      form.elements['code'].value = item.code ?? '';
-      form.elements['description'].value = item.description ?? '';
-      form.elements['budget_cents'].value = item.budget_cents ?? '';
+      form.elements['email'].value = item.email ?? '';
+      form.elements['title'].value = item.title ?? '';
+      form.elements['phone'].value = item.phone ?? '';
       form.elements['hourly_rate'].value = item.hourly_rate ?? '';
       form.elements['active'].checked = item.active;
-      form.elements['archived'].checked = item.archived;
+      form.elements['bio'].value = item.bio ?? '';
       form.elements['org_id'].value = item.org_id ?? '';
-      form.elements['client_id'].value = item.client_id ?? '';
-      form.elements['lead_id'].value = item.lead_id ?? '';
+      form.elements['department_id'].value = item.department_id ?? '';
+      form.elements['role_id'].value = item.role_id ?? '';
       dialog.showModal();
     };
 
     window.deleteItem = async function(id) {
-      if (!confirm('Delete this project?')) return;
+      if (!confirm('Delete this user?')) return;
       await fetch(`${API}/${id}`, { method: 'DELETE' });
       loadData();
     };

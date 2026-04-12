@@ -6,28 +6,96 @@ node = "22.13.1"
 _.file = ".env"
 PORT = "4200"
 
-[tasks.dev]
-description = "Build frontend + run server (PORT=4200)"
-run = "cargo run -p systems-codegen && cargo run -p stem-cell"
+# ── Codegen ──────────────────────────────────────────────────
+# Materializes contract stubs, tests, and registry from systems.yaml.
+# Safe to run repeatedly — only overwrites files with @generated-stub marker.
 
-[tasks.build]
-description = "Release build (frontend + server)"
-run = "cargo build --release -p stem-cell"
+[tasks.codegen]
+description = "Generate contract stubs + tests from systems.yaml"
+run = "cargo run -p systems-codegen"
+
+[tasks."codegen:force"]
+description = "Regenerate all stubs (overwrite even edited files)"
+run = "cargo run -p systems-codegen -- --force"
+
+# ── Development ──────────────────────────────────────────────
+
+[tasks.dev]
+description = "Codegen → build → run server (PORT=4200)"
+depends = ["codegen"]
+run = "cargo run -p stem-cell"
+
+[tasks."dev:full"]
+description = "Backend + Astro frontend dev server in parallel"
+depends = ["codegen", "frontend:install"]
+run = """
+cargo run -p stem-cell &
+BACKEND_PID=$!
+cd frontend && npm run dev &
+FRONTEND_PID=$!
+trap 'kill $BACKEND_PID $FRONTEND_PID 2>/dev/null' EXIT INT TERM
+wait
+"""
+
+# ── Checks & Linting ────────────────────────────────────────
 
 [tasks.check]
-description = "Type-check without building"
+description = "Codegen → type-check (no frontend build)"
+depends = ["codegen"]
 run = "SKIP_FRONTEND=1 cargo check -p stem-cell"
 
-[tasks."frontend:dev"]
-description = "Astro dev server with hot reload"
-dir = "frontend"
-run = "npm run dev"
+[tasks.lint]
+description = "Codegen → clippy on entire workspace"
+depends = ["codegen"]
+run = "SKIP_FRONTEND=1 cargo clippy --workspace"
+
+# ── Testing ──────────────────────────────────────────────────
+
+[tasks.test]
+description = "Codegen → run all workspace tests"
+depends = ["codegen"]
+run = "SKIP_FRONTEND=1 cargo test --workspace"
+
+[tasks."test:contracts"]
+description = "Run only contract tests"
+depends = ["codegen"]
+run = "SKIP_FRONTEND=1 cargo test --test contracts"
+
+# ── CI pipeline ──────────────────────────────────────────────
+
+[tasks.ci]
+description = "Full CI: codegen → check → clippy → test"
+depends = ["codegen"]
+run = """
+set -e
+echo "=== check ==="
+SKIP_FRONTEND=1 cargo check --workspace
+echo "=== clippy ==="
+SKIP_FRONTEND=1 cargo clippy --workspace -- -D warnings
+echo "=== test ==="
+SKIP_FRONTEND=1 cargo test --workspace
+echo "=== all green ==="
+"""
+
+# ── Build & Deploy ───────────────────────────────────────────
+
+[tasks.build]
+description = "Codegen → release build (frontend + server)"
+depends = ["codegen"]
+run = "cargo build --release -p stem-cell"
+
+[tasks.docker]
+description = "Build Docker image"
+run = "docker build -t stem-cell ."
+
+# ── Frontend ─────────────────────────────────────────────────
 
 [tasks."frontend:install"]
 description = "Install frontend dependencies"
 dir = "frontend"
 run = "npm install"
 
-[tasks.docker]
-description = "Build Docker image"
-run = "docker build -t stem-cell ."
+[tasks."frontend:dev"]
+description = "Astro dev server with hot reload"
+dir = "frontend"
+run = "npm run dev"

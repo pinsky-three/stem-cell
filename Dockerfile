@@ -46,14 +46,10 @@ FROM debian:bookworm-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       ca-certificates curl git podman fuse-overlayfs \
+       ca-certificates curl git \
+       build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --no-log-init app
-
-# Rootless Podman storage config (no real root / no daemon required)
-RUN mkdir -p /home/app/.config/containers \
-    && printf '[storage]\ndriver = "overlay"\ngraphroot = "/home/app/.local/share/containers/storage"\n' \
-       > /home/app/.config/containers/storage.conf
 
 WORKDIR /app
 

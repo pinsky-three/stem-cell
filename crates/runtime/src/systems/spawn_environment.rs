@@ -264,10 +264,6 @@ async fn run_subprocess_streaming(
 
     let script = format!(
         "set -e && \
-         if ! command -v cc >/dev/null 2>&1; then \
-           apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-             build-essential pkg-config libssl-dev >/dev/null 2>&1; \
-         fi && \
          git clone {repo} {dir} && cd {dir} && \
          if command -v mise >/dev/null 2>&1; then \
            mise trust && mise install --yes && mise run dev; \

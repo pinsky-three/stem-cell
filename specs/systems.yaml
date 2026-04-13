@@ -300,3 +300,21 @@ systems:
 
     result:
       - { name: "subscription", from: "subscription" }
+
+  # ── 6. Spawn a dev environment in a container ─────────────────
+  - name: "SpawnEnvironment"
+    mode: "contract"
+    description: "Creates a project, queues a build job, and spawns a Podman container to clone a repo and run mise run dev"
+    input:
+      - { name: "org_id",   type: "uuid",   required: true }
+      - { name: "user_id",  type: "uuid",   required: true }
+      - { name: "prompt",   type: "string", required: true }
+    output:
+      - { name: "project_id", type: "string" }
+      - { name: "job_id",     type: "string" }
+      - { name: "status",     type: "string" }
+    errors:
+      - "OrgNotFound"
+      - "UserNotFound"
+      - "SpawnFailed(String)"
+      - "DatabaseError(String)"

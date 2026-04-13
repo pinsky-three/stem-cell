@@ -45,16 +45,22 @@ RUN touch crates/runtime/src/main.rs crates/runtime/src/lib.rs \
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends \
+       ca-certificates curl git podman fuse-overlayfs \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --no-log-init app
+
+# Rootless Podman storage config (no real root / no daemon required)
+RUN mkdir -p /home/app/.config/containers \
+    && printf '[storage]\ndriver = "overlay"\ngraphroot = "/home/app/.local/share/containers/storage"\n' \
+       > /home/app/.config/containers/storage.conf
 
 WORKDIR /app
 
 COPY --from=builder /app/target/release/stem-cell ./server
 COPY --from=builder /app/public/ ./public/
 
-RUN mkdir -p /app/data && chown -R app:app /app
+RUN mkdir -p /app/data && chown -R app:app /app /home/app
 USER app
 
 ENV SERVE_DIR=public PORT=4200 \

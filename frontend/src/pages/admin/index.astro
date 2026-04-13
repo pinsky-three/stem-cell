@@ -103,6 +103,11 @@ import Base from "../../layouts/Base.astro";
         <p class="mt-2 text-sm text-neutral-400">Changes an organization's plan and processes payment via the payment provider</p>
         <p class="mt-2 text-xs text-neutral-500">3 inputs &middot; POST /api/systems/upgrade_subscription</p>
       </a>
+      <a href="/admin/systems/spawn_environment" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">SpawnEnvironment</h3>
+        <p class="mt-2 text-sm text-neutral-400">Creates a project, queues a build job, and spawns a Podman container to clone a repo and run mise run dev</p>
+        <p class="mt-2 text-xs text-neutral-500">3 inputs &middot; POST /api/systems/spawn_environment</p>
+      </a>
     </div>
   </div>
 

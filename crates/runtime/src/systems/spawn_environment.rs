@@ -266,12 +266,12 @@ async fn run_subprocess_streaming(
         "set -e && \
          git clone {repo} {dir} && cd {dir} && \
          if command -v mise >/dev/null 2>&1; then \
-           mise install --yes && mise run dev; \
+           mise trust && mise install --yes && mise run dev; \
          elif [ -x ~/.local/bin/mise ]; then \
-           ~/.local/bin/mise install --yes && ~/.local/bin/mise run dev; \
+           ~/.local/bin/mise trust && ~/.local/bin/mise install --yes && ~/.local/bin/mise run dev; \
          else \
            curl -fsSL https://mise.run | bash && \
-           ~/.local/bin/mise install --yes && ~/.local/bin/mise run dev; \
+           ~/.local/bin/mise trust && ~/.local/bin/mise install --yes && ~/.local/bin/mise run dev; \
          fi",
         repo = repo_url,
         dir = work_dir,

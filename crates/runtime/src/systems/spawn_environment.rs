@@ -265,14 +265,13 @@ async fn run_subprocess_streaming(
     let script = format!(
         "set -e && \
          git clone {repo} {dir} && cd {dir} && \
-         if command -v mise >/dev/null 2>&1; then \
-           mise trust && mise install --yes && mise run dev; \
-         elif [ -x ~/.local/bin/mise ]; then \
-           ~/.local/bin/mise trust && ~/.local/bin/mise install --yes && ~/.local/bin/mise run dev; \
-         else \
-           curl -fsSL https://mise.run | bash && \
-           ~/.local/bin/mise trust && ~/.local/bin/mise install --yes && ~/.local/bin/mise run dev; \
-         fi",
+         MISE=$( command -v mise || echo ~/.local/bin/mise ) && \
+         if [ ! -x \"$MISE\" ]; then \
+           curl -fsSL https://mise.run | bash && MISE=~/.local/bin/mise; \
+         fi && \
+         $MISE trust && \
+         flock /tmp/mise-install.lock $MISE install --yes && \
+         $MISE run check",
         repo = repo_url,
         dir = work_dir,
     );
@@ -295,8 +294,9 @@ async fn run_in_container_streaming(
              git curl ca-certificates build-essential pkg-config libssl-dev && \
          git clone {repo} /work && cd /work && \
          curl -fsSL https://mise.run | bash && \
+         ~/.local/bin/mise trust && \
          ~/.local/bin/mise install --yes && \
-         ~/.local/bin/mise run dev",
+         ~/.local/bin/mise run check",
         repo = repo_url,
     );
 

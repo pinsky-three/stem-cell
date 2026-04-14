@@ -8,12 +8,19 @@ use axum::{
 };
 use sqlx::PgPool;
 
-/// Build the router that proxies `/env/:deployment_id/...` to child servers.
+/// Build the router that proxies `/env/{id}/...` to child servers.
 pub fn router(pool: PgPool) -> Router {
     Router::new()
-        .route("/env/{deployment_id}", any(proxy_root))
+        .route("/env/{deployment_id}", any(proxy_no_slash))
+        .route("/env/{deployment_id}/", any(proxy_root))
         .route("/env/{deployment_id}/{*rest}", any(proxy_handler))
         .with_state(pool)
+}
+
+async fn proxy_no_slash(
+    Path(deployment_id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    axum::response::Redirect::permanent(&format!("/env/{deployment_id}/"))
 }
 
 async fn proxy_root(

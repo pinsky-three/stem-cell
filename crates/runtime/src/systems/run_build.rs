@@ -153,11 +153,13 @@ impl RunBuildSystem for super::AppSystems {
         // Signal from forwarder → main task when SSE is connected
         let (connected_tx, connected_rx) = tokio::sync::oneshot::channel::<()>();
 
+        // The forwarder returns Some(log_buf) on MessageCompleted, None on error/timeout.
         let forwarder = tokio::spawn(async move {
             use futures::StreamExt;
             let mut stream = std::pin::pin!(event_stream);
             let mut log_buf = String::new();
             let mut connected_tx = Some(connected_tx);
+            let mut completed = false;
             let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(600);
 
             loop {
@@ -203,6 +205,7 @@ impl RunBuildSystem for super::AppSystems {
                         }
                         Ok(opencode_client::OpenCodeEvent::MessageCompleted { .. }) => {
                             tracing::info!("OpenCode message completed, flushing logs");
+                            completed = true;
                             if !log_buf.is_empty() {
                                 let _ = sqlx::query(
                                     "UPDATE build_jobs SET logs = $2, updated_at = NOW() WHERE id = $1",
@@ -243,7 +246,7 @@ impl RunBuildSystem for super::AppSystems {
                     },
                 }
             }
-            log_buf
+            if completed { Some(log_buf) } else { None }
         });
 
         // Wait up to 15s for the SSE stream to connect before sending prompt
@@ -278,8 +281,20 @@ impl RunBuildSystem for super::AppSystems {
 
         tracing::info!(session_id = %session.id, "prompt sent, waiting for completion via SSE");
 
-        // Wait for the event forwarder to finish (it breaks on MessageCompleted)
-        let assistant_content = forwarder.await.unwrap_or_default();
+        // Wait for the event forwarder to finish (it breaks on MessageCompleted).
+        // Returns Some(text) on success, None if SSE failed or timed out.
+        let forwarder_result = forwarder.await.unwrap_or(None);
+
+        if forwarder_result.is_none() {
+            tracing::warn!(
+                session_id = %session.id,
+                "SSE forwarder did not receive MessageCompleted — \
+                 OpenCode may not have processed the prompt"
+            );
+            // Fall through: try to collect whatever diffs exist anyway.
+        }
+
+        let assistant_content = forwarder_result.unwrap_or_default();
 
         // ── Collect diffs as artifacts ─────────────────────────
         let diffs = client.session_diff(&session.id).await.unwrap_or_default();

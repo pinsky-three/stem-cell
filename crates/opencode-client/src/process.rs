@@ -9,6 +9,30 @@ use tokio::sync::RwLock;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Environment variables forwarded from the parent process to spawned
+/// OpenCode servers. Covers major AI provider credentials and OpenCode
+/// configuration knobs that the user may set in their shell or .env.
+const FORWARDED_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_REGION",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "OPENROUTER_API_KEY",
+    "GROQ_API_KEY",
+    "MISTRAL_API_KEY",
+    "XAI_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "OPENCODE_MODEL",
+    "OPENCODE_PROVIDER",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+];
+
 /// Resolved path to the `opencode` binary (cached at first spawn).
 static OPENCODE_BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -155,6 +179,12 @@ impl ProcessManager {
 
         if let Some(ref pw) = self.config.server_password {
             cmd.env("OPENCODE_SERVER_PASSWORD", pw);
+        }
+
+        for key in FORWARDED_ENV_VARS {
+            if let Ok(val) = std::env::var(key) {
+                cmd.env(key, val);
+            }
         }
 
         let child = cmd

@@ -18,7 +18,6 @@ pub fn subscribe(
 
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(0)) // no response timeout for SSE
         .no_proxy()
         .build()
         .map_err(|e| Error::SseError(e.to_string()))?;

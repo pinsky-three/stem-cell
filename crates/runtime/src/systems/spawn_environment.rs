@@ -2,7 +2,7 @@ use crate::system_api::*;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-const DEFAULT_REPO_URL: &str = "https://github.com/pinsky-three/stem-cell";
+const DEFAULT_REPO_URL: &str = "https://github.com/pinsky-three/stem-cell-shrank";
 const CONTAINER_MEMORY_LIMIT: &str = "2g";
 
 /// Max time allowed for the synchronous handler work (DB inserts).
@@ -315,13 +315,11 @@ async fn detect_runtime() -> Result<&'static str, String> {
 // ── Log flushing ───────────────────────────────────────────────────────
 
 async fn flush_logs(pool: &sqlx::PgPool, job_id: uuid::Uuid, logs: &str) {
-    if let Err(e) = sqlx::query(
-        "UPDATE build_jobs SET logs = $2, updated_at = NOW() WHERE id = $1",
-    )
-    .bind(job_id)
-    .bind(logs)
-    .execute(pool)
-    .await
+    if let Err(e) = sqlx::query("UPDATE build_jobs SET logs = $2, updated_at = NOW() WHERE id = $1")
+        .bind(job_id)
+        .bind(logs)
+        .execute(pool)
+        .await
     {
         tracing::warn!(%job_id, error = %e, "failed to flush logs");
     }
@@ -458,7 +456,14 @@ async fn spawn_and_serve(
     }
 
     let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
-    let tail: String = log_buf.chars().rev().take(500).collect::<String>().chars().rev().collect();
+    let tail: String = log_buf
+        .chars()
+        .rev()
+        .take(500)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
     Err(format!("{program} exited with {status}: …{tail}"))
 }
 
@@ -526,12 +531,11 @@ async fn stream_until_exit(
     .execute(pool)
     .await;
 
-    let _ = sqlx::query(
-        "UPDATE build_jobs SET status = 'stopped', updated_at = NOW() WHERE id = $1",
-    )
-    .bind(job_id)
-    .execute(pool)
-    .await;
+    let _ =
+        sqlx::query("UPDATE build_jobs SET status = 'stopped', updated_at = NOW() WHERE id = $1")
+            .bind(job_id)
+            .execute(pool)
+            .await;
 }
 
 /// Insert a Deployment row and link it back to the BuildJob.
@@ -563,14 +567,12 @@ async fn create_deployment(
     .await
     .map_err(|e| format!("insert deployment: {e}"))?;
 
-    sqlx::query(
-        "UPDATE build_jobs SET deployment_id = $2, updated_at = NOW() WHERE id = $1",
-    )
-    .bind(job_id)
-    .bind(deployment_id)
-    .execute(pool)
-    .await
-    .map_err(|e| format!("link deployment to job: {e}"))?;
+    sqlx::query("UPDATE build_jobs SET deployment_id = $2, updated_at = NOW() WHERE id = $1")
+        .bind(job_id)
+        .bind(deployment_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("link deployment to job: {e}"))?;
 
     tracing::info!(%job_id, %deployment_id, %port, "deployment created");
     Ok(())

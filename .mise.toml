@@ -1,6 +1,7 @@
 [tools]
 rust = "1.94.1"
 node = "22.13.1"
+opencode = "latest"
 
 [env]
 _.file = ".env"
@@ -99,3 +100,9 @@ run = "npm install"
 description = "Astro dev server with hot reload"
 dir = "frontend"
 run = "npm run dev"
+
+# ── AI ──────────────────────────────────────────────────────
+
+[tasks."ai:launch"]
+description = "Launch OpenCode Server in background"
+run = "opencode serve"

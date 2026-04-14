@@ -35,7 +35,7 @@ export default function HeroPrompt() {
       }
 
       const data: SpawnResult = await res.json();
-      window.location.href = `/project/${data.project_id}`;
+      window.location.href = `/project/${data.project_id}?job=${data.job_id}`;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
       setIsLoading(false);

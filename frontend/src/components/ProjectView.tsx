@@ -279,15 +279,26 @@ export default function ProjectView({ projectId }: { projectId: string }) {
 
   useEffect(() => stopPolling, [stopPolling]);
 
-  // Load existing build job for this project on mount
+  // On mount: if job_id is in URL params, start polling immediately.
+  // Otherwise, fetch the latest job for this project.
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const jobIdParam = params.get("job");
+
+    if (jobIdParam) {
+      setIsLoading(true);
+      setTab("logs");
+      startPolling(jobIdParam);
+      return;
+    }
+
     (async () => {
       try {
         const res = await fetch(`/api/build_jobs?sort=created_at&order=desc&limit=1&project_id=${projectId}`);
         if (!res.ok) return;
-        const { data } = await res.json();
-        if (data?.length > 0) {
-          const latest: BuildJob = data[0];
+        const jobs: BuildJob[] = await res.json();
+        if (jobs.length > 0) {
+          const latest = jobs[0];
           setJob(latest);
           if (!TERMINAL_STATUSES.has(latest.status)) {
             setIsLoading(true);
@@ -300,14 +311,14 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     })();
   }, [projectId, startPolling]);
 
-  // Load existing messages for this project on mount
+  // Load existing messages for this project
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`/api/messages?sort=created_at&order=asc&limit=100&project_id=${projectId}`);
+        const res = await fetch(`/api/messages?sort=created_at&order=asc&limit=100&conversation_id=${projectId}`);
         if (!res.ok) return;
-        const { data } = await res.json();
-        if (data) setMessages(data);
+        const msgs: Message[] = await res.json();
+        if (msgs.length > 0) setMessages(msgs);
       } catch {
         /* ignore */
       }

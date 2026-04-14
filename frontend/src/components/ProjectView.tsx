@@ -709,12 +709,23 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     })();
   }, [projectId, startPolling]);
 
-  // Load existing messages for this project
+  // Load existing messages for this project.
+  // First resolve the project's conversation, then fetch its messages.
   useEffect(() => {
     (async () => {
       try {
+        // Find the conversation for this project
+        const convRes = await fetch(
+          `/api/conversations?project_id=${projectId}&limit=1&sort=created_at&order=desc`,
+        );
+        if (!convRes.ok) return;
+        const convs: { id: string }[] = await convRes.json();
+        if (convs.length === 0) return;
+
+        const conversationId = convs[0].id;
+
         const res = await fetch(
-          `/api/messages?sort=created_at&order=asc&limit=100&conversation_id=${projectId}`,
+          `/api/messages?sort=created_at&order=asc&limit=100&conversation_id=${conversationId}`,
         );
         if (!res.ok) return;
         const msgs: Message[] = await res.json();

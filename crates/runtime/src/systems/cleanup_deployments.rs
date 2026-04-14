@@ -197,7 +197,8 @@ async fn fetch_stale(pool: &sqlx::PgPool, max_age_minutes: i32) -> Result<Vec<De
 
 // ── Process management ──────────────────────────────────────────────────
 
-async fn kill_process(pid: i32) {
+/// Best-effort SIGTERM then SIGKILL (process group + direct). Used by cleanup and deploy restart.
+pub(crate) async fn kill_process(pid: i32) {
     #[cfg(unix)]
     {
         use std::process::Command;

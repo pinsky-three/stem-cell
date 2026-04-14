@@ -501,6 +501,8 @@ impl RunBuildSystem for super::AppSystems {
         )
         .await;
 
+        super::spawn_environment::restart_deployment_after_opencode_build(pool, project_id).await;
+
         tracing::info!(
             artifacts_count,
             tokens_used,

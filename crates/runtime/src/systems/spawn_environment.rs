@@ -1,4 +1,5 @@
 use crate::system_api::*;
+use sqlx::Row;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -377,8 +378,6 @@ async fn spawn_and_serve(
     let mut health_timer = tokio::time::interval(HEALTH_POLL_INTERVAL);
     health_timer.tick().await;
     let health_deadline = tokio::time::Instant::now() + HEALTH_TIMEOUT;
-    #[allow(unused_assignments)]
-    let mut healthy = false;
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -396,9 +395,8 @@ async fn spawn_and_serve(
                             dirty = true;
                         }
                     }
-                    Ok(None) if !healthy => break,
-                    Err(_) if !healthy => break,
-                    _ => break,
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
             line = stderr_reader.next_line() => {
@@ -410,9 +408,8 @@ async fn spawn_and_serve(
                             dirty = true;
                         }
                     }
-                    Ok(None) if !healthy => break,
-                    Err(_) if !healthy => break,
-                    _ => break,
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
             _ = flush_timer.tick() => {
@@ -421,7 +418,7 @@ async fn spawn_and_serve(
                     dirty = false;
                 }
             }
-            _ = health_timer.tick(), if !healthy => {
+            _ = health_timer.tick() => {
                 if tokio::time::Instant::now() > health_deadline {
                     if dirty { flush_logs(pool, job_id, &log_buf).await; }
                     let _ = child.kill().await;
@@ -440,11 +437,17 @@ async fn spawn_and_serve(
                     }
 
                     let child_pid = child.id().map(|p| p as i32);
-                    if let Err(e) = create_deployment(pool, job_id, project_id, port, child_pid).await {
-                        tracing::error!(%job_id, error = %e, "failed to create deployment");
-                        let _ = child.kill().await;
-                        return Err(e);
-                    }
+                    let exit_pid = child_pid.unwrap_or(-1);
+                    let deployment_id = match create_deployment(pool, job_id, project_id, port, child_pid)
+                        .await
+                    {
+                        Ok(id) => id,
+                        Err(e) => {
+                            tracing::error!(%job_id, error = %e, "failed to create deployment");
+                            let _ = child.kill().await;
+                            return Err(e);
+                        }
+                    };
 
                     let bg_pool = pool.clone();
                     tokio::spawn(async move {
@@ -453,6 +456,8 @@ async fn spawn_and_serve(
                             &mut stderr_reader,
                             &mut log_buf,
                             job_id,
+                            deployment_id,
+                            exit_pid,
                             &bg_pool,
                             child,
                         )
@@ -488,6 +493,8 @@ async fn stream_until_exit(
     stderr_reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStderr>>,
     log_buf: &mut String,
     job_id: uuid::Uuid,
+    deployment_id: uuid::Uuid,
+    exit_pid: i32,
     pool: &sqlx::PgPool,
     mut child: tokio::process::Child,
 ) {
@@ -535,21 +542,25 @@ async fn stream_until_exit(
     }
 
     let _ = child.wait().await;
-    tracing::info!(%job_id, "child process exited, marking deployment stopped");
+    tracing::info!(%job_id, %exit_pid, "child process exited");
 
-    let _ = sqlx::query(
-        "UPDATE deployments SET status = 'stopped', active = false, updated_at = NOW() \
-         WHERE build_job_id = $1",
-    )
-    .bind(job_id)
-    .execute(pool)
-    .await;
+    // Only mark stopped if this process is still the one recorded (avoids racing a deploy restart).
+    if exit_pid >= 0 {
+        let res = sqlx::query(
+            "UPDATE deployments SET status = 'stopped', active = false, updated_at = NOW() \
+             WHERE id = $1 AND pid = $2",
+        )
+        .bind(deployment_id)
+        .bind(exit_pid)
+        .execute(pool)
+        .await;
 
-    let _ =
-        sqlx::query("UPDATE build_jobs SET status = 'stopped', updated_at = NOW() WHERE id = $1")
-            .bind(job_id)
-            .execute(pool)
-            .await;
+        if let Ok(r) = res
+            && r.rows_affected() > 0
+        {
+            tracing::info!(%deployment_id, "deployment marked stopped (dev process exit)");
+        }
+    }
 }
 
 /// Insert a Deployment row and link it back to the BuildJob.
@@ -559,7 +570,7 @@ async fn create_deployment(
     project_id: uuid::Uuid,
     port: u16,
     pid: Option<i32>,
-) -> Result<(), String> {
+) -> Result<uuid::Uuid, String> {
     let deployment_id = uuid::Uuid::new_v4();
     let subdomain = format!("env-{}", &job_id.to_string()[..8]);
     let url = format!("/env/{deployment_id}/");
@@ -589,7 +600,213 @@ async fn create_deployment(
         .map_err(|e| format!("link deployment to job: {e}"))?;
 
     tracing::info!(%job_id, %deployment_id, %port, "deployment created");
-    Ok(())
+    Ok(deployment_id)
+}
+
+/// After OpenCode writes files, restart `mise run dev` in the checkout so the preview reloads.
+/// Subprocess mode only; best-effort (never fails the OpenCode build).
+pub(super) async fn restart_deployment_after_opencode_build(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+) {
+    let mode = std::env::var("SPAWN_MODE").unwrap_or_default();
+    if mode != "subprocess" {
+        tracing::debug!(%project_id, %mode, "skip deploy restart — not subprocess mode");
+        return;
+    }
+
+    let row = sqlx::query(
+        "SELECT d.id, d.build_job_id, d.port, d.pid \
+         FROM deployments d \
+         WHERE d.project_id = $1 AND d.active = true AND d.deleted_at IS NULL \
+           AND d.status = 'running' \
+         ORDER BY d.created_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await;
+
+    let row = match row {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            tracing::debug!(%project_id, "no active deployment to restart after build");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%project_id, error = %e, "deploy restart: query failed");
+            return;
+        }
+    };
+
+    let deployment_id: uuid::Uuid = row.get("id");
+    let spawn_job_id: uuid::Uuid = row.get("build_job_id");
+    let port: i32 = row.get("port");
+    let port: u16 = port.try_into().unwrap_or(28_000);
+    let old_pid: Option<i32> = row.get("pid");
+
+    let work_dir = format!("/tmp/stem-cell-{spawn_job_id}");
+    if !tokio::fs::try_exists(&work_dir).await.unwrap_or(false) {
+        tracing::warn!(%work_dir, "deploy restart: work dir missing");
+        return;
+    }
+
+    if let Some(pid) = old_pid {
+        let _ = sqlx::query(
+            "UPDATE deployments SET pid = NULL, updated_at = NOW() \
+             WHERE id = $1 AND pid = $2",
+        )
+        .bind(deployment_id)
+        .bind(pid)
+        .execute(pool)
+        .await;
+        super::cleanup_deployments::kill_process(pid).await;
+    }
+
+    let script = format!(
+        "set -e && cd {dir} && \
+         MISE=$( command -v mise || echo ~/.local/bin/mise ) && \
+         if [ ! -x \"$MISE\" ]; then \
+           curl -fsSL https://mise.run | bash && MISE=~/.local/bin/mise; \
+         fi && \
+         $MISE trust && \
+         $MISE run dev",
+        dir = work_dir,
+    );
+
+    let mut child = match tokio::process::Command::new("bash")
+        .args(["-c", &script])
+        .env("MISE_YES", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(%deployment_id, error = %e, "deploy restart: spawn failed");
+            return;
+        }
+    };
+
+    tracing::info!(%deployment_id, %port, "deploy restart: new dev process spawned");
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let mut log_buf = String::new();
+    let mut dirty = false;
+    let mut flush_timer = tokio::time::interval(LOG_FLUSH_INTERVAL);
+    flush_timer.tick().await;
+
+    let health_url = format!("http://127.0.0.1:{port}/healthz");
+    let mut health_timer = tokio::time::interval(HEALTH_POLL_INTERVAL);
+    health_timer.tick().await;
+    let health_deadline = tokio::time::Instant::now() + HEALTH_TIMEOUT;
+
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+
+    loop {
+        tokio::select! {
+            line = stdout_reader.next_line() => {
+                match line {
+                    Ok(Some(l)) => {
+                        if log_buf.len() < MAX_LOG_BYTES {
+                            log_buf.push_str(&l);
+                            log_buf.push('\n');
+                            dirty = true;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            line = stderr_reader.next_line() => {
+                match line {
+                    Ok(Some(l)) => {
+                        if log_buf.len() < MAX_LOG_BYTES {
+                            log_buf.push_str(&l);
+                            log_buf.push('\n');
+                            dirty = true;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+            _ = flush_timer.tick() => {
+                if dirty {
+                    flush_logs(pool, spawn_job_id, &log_buf).await;
+                    dirty = false;
+                }
+            }
+            _ = health_timer.tick() => {
+                if tokio::time::Instant::now() > health_deadline {
+                    if dirty { flush_logs(pool, spawn_job_id, &log_buf).await; }
+                    let _ = child.kill().await;
+                    tracing::error!(%deployment_id, "deploy restart: health check timed out");
+                    return;
+                }
+                if let Ok(resp) = http.get(&health_url).send().await
+                    && resp.status().is_success()
+                {
+                    tracing::info!(%deployment_id, %port, "deploy restart: child server is healthy");
+                    if dirty {
+                        flush_logs(pool, spawn_job_id, &log_buf).await;
+                    }
+
+                    let child_pid = child.id().map(|p| p as i32);
+                    let exit_pid = child_pid.unwrap_or(-1);
+                    if let Err(e) = sqlx::query(
+                        "UPDATE deployments SET pid = $2, status = 'running', active = true, \
+                         updated_at = NOW() WHERE id = $1",
+                    )
+                    .bind(deployment_id)
+                    .bind(child_pid)
+                    .execute(pool)
+                    .await
+                    {
+                        tracing::error!(%deployment_id, error = %e, "deploy restart: failed to record pid");
+                        let _ = child.kill().await;
+                        return;
+                    }
+
+                    let bg_pool = pool.clone();
+                    tokio::spawn(async move {
+                        stream_until_exit(
+                            &mut stdout_reader,
+                            &mut stderr_reader,
+                            &mut log_buf,
+                            spawn_job_id,
+                            deployment_id,
+                            exit_pid,
+                            &bg_pool,
+                            child,
+                        )
+                        .await;
+                    });
+                    tracing::info!(%deployment_id, "deploy restart complete");
+                    return;
+                }
+            }
+        }
+    }
+
+    if dirty {
+        flush_logs(pool, spawn_job_id, &log_buf).await;
+    }
+
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(%deployment_id, error = %e, "deploy restart: wait failed");
+            return;
+        }
+    };
+    tracing::error!(%deployment_id, ?status, "deploy restart: dev exited before healthy");
 }
 
 /// Creates a new "opencode" build job and executes RunBuild to transform

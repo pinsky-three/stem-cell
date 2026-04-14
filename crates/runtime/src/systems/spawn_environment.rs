@@ -30,6 +30,8 @@ impl SpawnEnvironmentSystem for super::AppSystems {
         pool: &sqlx::PgPool,
         input: SpawnEnvironmentInput,
     ) -> Result<SpawnEnvironmentOutput, SpawnEnvironmentError> {
+        super::cleanup_deployments::ensure_periodic_cleanup(pool.clone());
+
         let span = tracing::info_span!(
             "spawn_environment",
             org_id = %input.org_id,

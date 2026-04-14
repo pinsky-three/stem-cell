@@ -156,6 +156,7 @@ systems:
           - { field: "duration_ms",    value: 0 }
           - { field: "logs",           value: "" }
           - { field: "deployment_id",  value: null }
+          - { field: "opencode_session_id", value: null }
           - { field: "project_id",     from: "project.id" }
           - { field: "message_id",     from: "message.id" }
         as: "build_job"

@@ -15,7 +15,7 @@ function setHostParam(key: string, value: string | null) {
   window.history.replaceState(null, "", url.toString());
 }
 
-const POLL_INTERVAL_MS = 2_000;
+const POLL_INTERVAL_MS = 5_000;
 const TERMINAL_STATUSES = new Set(["succeeded", "failed", "stopped"]);
 
 interface BuildJob {
@@ -484,6 +484,48 @@ function StatusBar({ job }: { job: BuildJob | null }) {
   );
 }
 
+// ── SSE event types ──────────────────────────────────────────────────────
+
+interface BuildStatusEvent {
+  event: "build_status";
+  job_id: string;
+  status: string;
+}
+
+interface MessageChunkEvent {
+  event: "message_chunk";
+  job_id: string;
+  text: string;
+}
+
+interface ToolCallEvent {
+  event: "tool_call";
+  job_id: string;
+  tool: string;
+  args?: unknown;
+}
+
+interface BuildCompleteEvent {
+  event: "build_complete";
+  job_id: string;
+  status: string;
+  artifacts_count: number;
+  tokens_used: number;
+}
+
+interface BuildErrorEvent {
+  event: "build_error";
+  job_id: string;
+  error: string;
+}
+
+type BuildEvent =
+  | BuildStatusEvent
+  | MessageChunkEvent
+  | ToolCallEvent
+  | BuildCompleteEvent
+  | BuildErrorEvent;
+
 // ── Main component ──────────────────────────────────────────────────────
 
 export default function ProjectView({ projectId }: { projectId: string }) {
@@ -491,7 +533,10 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [job, setJob] = useState<BuildJob | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [streamingText, setStreamingText] = useState("");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const streamingMsgIdRef = useRef<string | null>(null);
 
   const stopPolling = useCallback(() => {
     if (timerRef.current) {
@@ -527,10 +572,111 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     [pollJob, stopPolling],
   );
 
+  // ── SSE connection ────────────────────────────────────────
+  useEffect(() => {
+    const es = new EventSource(`/api/projects/${projectId}/events`);
+    eventSourceRef.current = es;
+
+    es.addEventListener("build.status", (e) => {
+      try {
+        const data: BuildStatusEvent = JSON.parse(e.data);
+        setJob((prev) =>
+          prev ? { ...prev, status: data.status } : prev,
+        );
+        if (data.status === "running") {
+          setIsLoading(true);
+        }
+      } catch { /* ignore parse errors */ }
+    });
+
+    es.addEventListener("message.chunk", (e) => {
+      try {
+        const data: MessageChunkEvent = JSON.parse(e.data);
+        setStreamingText((prev) => prev + data.text);
+
+        // Append streaming text to logs too
+        setJob((prev) =>
+          prev ? { ...prev, logs: (prev.logs || "") + data.text } : prev,
+        );
+      } catch { /* ignore */ }
+    });
+
+    es.addEventListener("tool.call", (e) => {
+      try {
+        const data: ToolCallEvent = JSON.parse(e.data);
+        const logLine = `[tool] ${data.tool}\n`;
+        setJob((prev) =>
+          prev ? { ...prev, logs: (prev.logs || "") + logLine } : prev,
+        );
+      } catch { /* ignore */ }
+    });
+
+    es.addEventListener("build.complete", (e) => {
+      try {
+        const data: BuildCompleteEvent = JSON.parse(e.data);
+
+        // Finalize the streaming assistant message
+        setStreamingText((current) => {
+          if (current) {
+            const finalMsg: Message = {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: current,
+              created_at: new Date().toISOString(),
+            };
+            setMessages((prev) => [...prev, finalMsg]);
+          }
+          return "";
+        });
+        streamingMsgIdRef.current = null;
+
+        setJob((prev) =>
+          prev
+            ? {
+                ...prev,
+                status: data.status,
+              }
+            : prev,
+        );
+        setIsLoading(false);
+
+        // Refresh full job data from API for deployment_id, etc.
+        if (data.job_id) {
+          fetch(`/api/build_jobs/${data.job_id}`)
+            .then((r) => r.json())
+            .then((j: BuildJob) => setJob(j))
+            .catch(() => {});
+        }
+      } catch { /* ignore */ }
+    });
+
+    es.addEventListener("build.error", (e) => {
+      try {
+        const data: BuildErrorEvent = JSON.parse(e.data);
+        setJob((prev) =>
+          prev
+            ? { ...prev, status: "failed", error_message: data.error }
+            : prev,
+        );
+        setIsLoading(false);
+        setStreamingText("");
+        streamingMsgIdRef.current = null;
+      } catch { /* ignore */ }
+    });
+
+    es.onerror = () => {
+      // EventSource auto-reconnects; no action needed
+    };
+
+    return () => {
+      es.close();
+      eventSourceRef.current = null;
+    };
+  }, [projectId]);
+
   useEffect(() => stopPolling, [stopPolling]);
 
-  // On mount: if job_id is in URL params, start polling immediately.
-  // Otherwise, fetch the latest job for this project.
+  // On mount: fetch the latest job for this project (fallback)
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const jobIdParam = params.get("job");
@@ -588,6 +734,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     };
     setMessages((prev) => [...prev, optimistic]);
     setIsLoading(true);
+    setStreamingText("");
     setTab("logs");
 
     try {
@@ -602,11 +749,25 @@ export default function ProjectView({ projectId }: { projectId: string }) {
       });
       if (!res.ok) throw new Error(await res.text());
       const { job_id } = await res.json();
+      // Start polling as fallback — SSE is the primary update channel
       startPolling(job_id);
     } catch (err) {
       setIsLoading(false);
     }
   };
+
+  // Combine persisted messages with the live streaming message
+  const displayMessages = streamingText
+    ? [
+        ...messages,
+        {
+          id: "streaming",
+          role: "assistant",
+          content: streamingText,
+          created_at: new Date().toISOString(),
+        },
+      ]
+    : messages;
 
   return (
     <div className="flex h-full flex-col">
@@ -640,7 +801,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           <div className="flex-1 overflow-hidden">
             {tab === "chat" ? (
               <ChatPanel
-                messages={messages}
+                messages={displayMessages}
                 onSend={handleSend}
                 isLoading={isLoading}
               />

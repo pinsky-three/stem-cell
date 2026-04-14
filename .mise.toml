@@ -101,8 +101,12 @@ description = "Astro dev server with hot reload"
 dir = "frontend"
 run = "npm run dev"
 
-# ── AI ──────────────────────────────────────────────────────
+# ── OpenCode ──────────────────────────────────────────────────
 
-[tasks."ai:launch"]
-description = "Launch OpenCode Server in background"
-run = "opencode serve"
+[tasks."opencode:serve"]
+description = "Start OpenCode server (dev/debug, port 14000)"
+run = "opencode serve --port 14000"
+
+[tasks."opencode:health"]
+description = "Check if an OpenCode server is responding"
+run = "curl -sf http://127.0.0.1:14000/global/health && echo ' OK' || echo 'NOT REACHABLE'"

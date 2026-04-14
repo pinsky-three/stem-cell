@@ -146,6 +146,7 @@ entities:
       - { name: "duration_ms",    type: "bigint", required: true }
       - { name: "logs",           type: "text",   required: true }
       - { name: "deployment_id", type: "uuid", required: false }
+      - { name: "opencode_session_id", type: "string", required: false }
       - name: "project_id"
         type: "uuid"
         required: true

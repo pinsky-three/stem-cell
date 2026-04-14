@@ -3,6 +3,7 @@ use stem_cell::{integrations, migrate, proxy, resource_api, systems};
 
 mod auth;
 mod email;
+mod events;
 mod migrate_auth;
 
 use std::net::SocketAddr;
@@ -100,6 +101,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Reverse proxy to spawned child environments
     let env_proxy = proxy::router(pool.clone());
 
+    // OpenCode process manager — one server per project
+    let oc_config = opencode_client::ProcessManagerConfig::from_env();
+    let oc_manager = std::sync::Arc::new(opencode_client::ProcessManager::new(oc_config));
+    systems::run_build::init_process_manager((*oc_manager).clone());
+    oc_manager.spawn_reaper();
+    tracing::info!("OpenCode process manager initialized");
+
+    // SSE endpoint for streaming build events to the frontend
+    let event_routes = events::router();
+
     // Health endpoints use PgPool state (consumes pool — must be last clone)
     let health_routes = Router::new()
         .route("/healthz", get(resource_api::healthz))
@@ -144,6 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(auth_routes)
         .merge(health_routes)
         .merge(env_proxy)
+        .merge(event_routes)
         .merge(spa_fallback)
         .merge(Scalar::with_url("/api/docs", openapi))
         .layer(cors)

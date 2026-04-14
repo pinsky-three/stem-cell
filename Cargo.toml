@@ -4,5 +4,6 @@ members = [
     "crates/resource-model-macro",
     "crates/system-model-macro",
     "crates/systems-codegen",
+    "crates/opencode-client",
     "crates/runtime",
 ]

@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 resource-model-macro = { path = "../../crates/resource-model-macro" }
 system-model-macro = { path = "../../crates/system-model-macro" }
+opencode-client = { path = "../../crates/opencode-client" }
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
     "tls-rustls",
@@ -38,6 +39,9 @@ rand = "0.9"
 base64 = "0.22"
 thiserror = "2"
 time = "0.3"
+futures = "0.3"
+tokio-stream = "0.1"
+async-stream = "0.3"
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

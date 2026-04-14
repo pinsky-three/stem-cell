@@ -1,5 +1,4 @@
-// @generated-stub
-mod run_build;
+pub mod run_build;
 mod cleanup_deployments;
 mod spawn_environment;
 

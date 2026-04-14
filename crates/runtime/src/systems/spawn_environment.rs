@@ -6,7 +6,7 @@ const DEFAULT_REPO_URL: &str = "https://github.com/pinsky-three/stem-cell-shrank
 const CONTAINER_MEMORY_LIMIT: &str = "2g";
 
 /// Max time allowed for the synchronous handler work (DB inserts).
-const HANDLER_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Max time the background container is allowed to run before being killed.
 const CONTAINER_TIMEOUT: Duration = Duration::from_secs(600);
@@ -146,6 +146,7 @@ async fn create_records(
     tracing::info!(%project_id, %job_id, "project and job created, spawning environment");
 
     let bg_pool = pool.clone();
+    let prompt_for_opencode = input.prompt.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
 
@@ -188,6 +189,19 @@ async fn create_records(
         }
 
         tracing::info!(%job_id, %status, duration_ms, "environment task finished");
+
+        // ── Trigger OpenCode transformation ──────────────────────
+        // After the template is deployed, create a new build job and run
+        // OpenCode to transform the code based on the user's prompt.
+        if status == "succeeded" {
+            trigger_opencode_build(
+                &bg_pool,
+                project_id,
+                message_id,
+                &prompt_for_opencode,
+            )
+            .await;
+        }
     });
 
     Ok(SpawnEnvironmentOutput {
@@ -576,4 +590,66 @@ async fn create_deployment(
 
     tracing::info!(%job_id, %deployment_id, %port, "deployment created");
     Ok(())
+}
+
+/// Creates a new "opencode" build job and executes RunBuild to transform
+/// the deployed template using the user's prompt via OpenCode.
+async fn trigger_opencode_build(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+    message_id: uuid::Uuid,
+    prompt: &str,
+) {
+    let oc_job_id = uuid::Uuid::new_v4();
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO build_jobs \
+             (id, status, prompt_summary, model, tokens_used, error_message, \
+              duration_ms, logs, deployment_id, project_id, message_id, created_at, updated_at) \
+         VALUES ($1, 'queued', $2, 'opencode', 0, '', 0, '', NULL, $3, $4, NOW(), NOW())",
+    )
+    .bind(oc_job_id)
+    .bind(prompt)
+    .bind(project_id)
+    .bind(message_id)
+    .execute(pool)
+    .await
+    {
+        tracing::error!(%project_id, error = %e, "failed to create OpenCode build job");
+        return;
+    }
+
+    tracing::info!(%project_id, %oc_job_id, "triggering OpenCode build");
+
+    let input = crate::system_api::RunBuildInput {
+        build_job_id: oc_job_id,
+    };
+
+    match <super::AppSystems as crate::system_api::RunBuildSystem>::execute(
+        &super::AppSystems,
+        pool,
+        input,
+    )
+    .await
+    {
+        Ok(output) => {
+            tracing::info!(
+                %project_id,
+                %oc_job_id,
+                artifacts = output.artifacts_count,
+                tokens = output.tokens_used,
+                "OpenCode build completed"
+            );
+        }
+        Err(e) => {
+            tracing::error!(%project_id, %oc_job_id, error = ?e, "OpenCode build failed");
+            let _ = sqlx::query(
+                "UPDATE build_jobs SET status = 'failed', error_message = $2, updated_at = NOW() WHERE id = $1",
+            )
+            .bind(oc_job_id)
+            .bind(format!("{e:?}"))
+            .execute(pool)
+            .await;
+        }
+    }
 }

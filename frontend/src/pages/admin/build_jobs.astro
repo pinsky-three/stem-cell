@@ -28,6 +28,7 @@ import Base from "../../layouts/Base.astro";
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">duration_ms</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">logs</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">deployment_id</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">opencode_session_id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">project_id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">message_id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">actions</th>
@@ -58,6 +59,8 @@ import Base from "../../layouts/Base.astro";
         <textarea name="logs" placeholder="logs" rows="2"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required></textarea>
         <input type="text" name="deployment_id" placeholder="deployment_id"
+              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
+        <input type="text" name="opencode_session_id" placeholder="opencode_session_id"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
         <input type="text" name="project_id" placeholder="project_id (UUID)"
               pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
@@ -100,6 +103,7 @@ import Base from "../../layouts/Base.astro";
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.duration_ms??'—'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.logs??'—'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.deployment_id??'—'}</td>`+
+        `<td class="px-4 py-3 text-sm text-neutral-300">${r.opencode_session_id??'—'}</td>`+
         `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/projects" class="text-indigo-400 hover:underline">${r.project_id?r.project_id.substring(0,8)+'...':'—'}</a></td>`+
         `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/messages" class="text-indigo-400 hover:underline">${r.message_id?r.message_id.substring(0,8)+'...':'—'}</a></td>` +
         `<td class="px-4 py-3 text-sm flex gap-3">
@@ -135,6 +139,7 @@ import Base from "../../layouts/Base.astro";
         duration_ms: form.elements['duration_ms'].value ? Number(form.elements['duration_ms'].value) : null,
         logs: form.elements['logs'].value,
         deployment_id: form.elements['deployment_id'].value || null,
+        opencode_session_id: form.elements['opencode_session_id'].value || null,
         project_id: form.elements['project_id'].value,
         message_id: form.elements['message_id'].value
       };
@@ -162,6 +167,7 @@ import Base from "../../layouts/Base.astro";
       form.elements['duration_ms'].value = item.duration_ms ?? '';
       form.elements['logs'].value = item.logs ?? '';
       form.elements['deployment_id'].value = item.deployment_id ?? '';
+      form.elements['opencode_session_id'].value = item.opencode_session_id ?? '';
       form.elements['project_id'].value = item.project_id ?? '';
       form.elements['message_id'].value = item.message_id ?? '';
       dialog.showModal();

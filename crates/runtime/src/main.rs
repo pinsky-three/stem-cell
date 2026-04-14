@@ -129,7 +129,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         get(move || async move {
             let path = std::path::Path::new(&project_page).join("project/index.html");
             match tokio::fs::read(path).await {
-                Ok(bytes) => axum::response::Html(bytes).into_response(),
+                Ok(bytes) => (
+                    [(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")],
+                    axum::response::Html(bytes),
+                ).into_response(),
                 Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
             }
         }),

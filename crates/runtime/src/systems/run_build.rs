@@ -30,6 +30,32 @@ pub fn process_manager() -> &'static opencode_client::ProcessManager {
         .expect("ProcessManager not initialized — call init_process_manager in main")
 }
 
+/// Default system text for OpenCode: file edits only; host owns dev/preview lifecycle.
+const OPENCODE_BUILD_SYSTEM_DEFAULT: &str = concat!(
+    "You are editing a repository checkout managed by an external host.\n",
+    "\n",
+    "Rules:\n",
+    "- Make file edits only. Do not start long-lived processes: no `mise run dev`, ",
+    "`npm run dev`, `vite`, `astro dev`, or similar preview servers; the host starts ",
+    "and owns the dev server lifecycle.\n",
+    "- Do not tell the user to open localhost URLs for preview; the host manages that.\n",
+    "- Be concise. Do not repeat the same explanation or plan twice in one reply.\n",
+    "- Avoid broad process-killing commands (e.g. killing all node processes) that could ",
+    "stop the host-managed dev server.\n",
+    "- You may fix project files so that when the host runs `mise run dev`, the app builds ",
+    "and serves correctly.",
+);
+
+/// If `STEM_CELL_OPENCODE_SYSTEM_PROMPT` is set and non-empty after trim, it replaces the
+/// default; if set to whitespace-only, no system message is sent.
+fn opencode_build_system_prompt() -> Option<String> {
+    match std::env::var("STEM_CELL_OPENCODE_SYSTEM_PROMPT") {
+        Ok(s) if !s.trim().is_empty() => Some(s),
+        Ok(_) => None,
+        Err(_) => Some(OPENCODE_BUILD_SYSTEM_DEFAULT.to_string()),
+    }
+}
+
 #[async_trait::async_trait]
 impl RunBuildSystem for super::AppSystems {
     async fn execute(
@@ -164,13 +190,19 @@ impl RunBuildSystem for super::AppSystems {
             let mut completed = false;
             let mut part_text_seen: HashMap<String, String> = HashMap::new();
             let mut tool_calls_announced: HashSet<String> = HashSet::new();
-            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(600);
+            let sse_secs: u64 = std::env::var("STEM_CELL_RUN_BUILD_SSE_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .filter(|&n| (60..=86_400).contains(&n))
+                .unwrap_or(1800);
+            let deadline =
+                tokio::time::Instant::now() + tokio::time::Duration::from_secs(sse_secs);
 
             loop {
                 let next = tokio::time::timeout_at(deadline, stream.next()).await;
                 match next {
                     Err(_) => {
-                        tracing::warn!("SSE forwarder timed out after 10 min");
+                        tracing::warn!(timeout_secs = sse_secs, "SSE forwarder timed out");
                         break;
                     }
                     Ok(None) => {
@@ -367,6 +399,7 @@ impl RunBuildSystem for super::AppSystems {
         // Model is configured server-side via OPENCODE_CONFIG_CONTENT;
         // the per-request model field uses a different format (object)
         // and is only needed for overrides, so we omit it.
+        let oc_system = opencode_build_system_prompt();
         client
             .prompt_async(
                 &session.id,
@@ -374,6 +407,7 @@ impl RunBuildSystem for super::AppSystems {
                     text: prompt.clone(),
                 }],
                 None,
+                oc_system.as_deref(),
             )
             .await
             .map_err(|e| RunBuildError::AiProviderError(e.to_string()))?;
@@ -550,6 +584,26 @@ async fn resolve_work_dir_for_project(
     if let Some(row) = deploy_row {
         let spawn_job_id: uuid::Uuid = row.get("build_job_id");
         let dir = std::path::PathBuf::from(format!("/tmp/stem-cell-{spawn_job_id}"));
+        if dir.exists() {
+            return Ok(dir);
+        }
+    }
+
+    // Spawn in progress (no deployment row yet): env checkout is /tmp/stem-cell-{spawn job id}
+    let spawn_row = sqlx::query(
+        "SELECT id FROM build_jobs \
+         WHERE project_id = $1 AND model = 'container' \
+           AND deployment_id IS NULL AND status = 'running' AND deleted_at IS NULL \
+         ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("query spawn build_job: {e}"))?;
+
+    if let Some(row) = spawn_row {
+        let spawn_id: uuid::Uuid = row.get("id");
+        let dir = std::path::PathBuf::from(format!("/tmp/stem-cell-{spawn_id}"));
         if dir.exists() {
             return Ok(dir);
         }

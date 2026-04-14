@@ -46,23 +46,24 @@ impl Stream for SseStream {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
         use futures::stream::StreamExt;
-        match self.es.poll_next_unpin(cx) {
-            std::task::Poll::Ready(Some(Ok(Event::Open))) => {
-                std::task::Poll::Ready(Some(Ok(OpenCodeEvent::ServerConnected)))
-            }
-            std::task::Poll::Ready(Some(Ok(Event::Message(msg)))) => {
-                let event = OpenCodeEvent::parse(&msg.event, &msg.data);
-                std::task::Poll::Ready(Some(Ok(event)))
-            }
-            std::task::Poll::Ready(Some(Err(e))) => {
-                if matches!(e, reqwest_eventsource::Error::StreamEnded) {
-                    std::task::Poll::Ready(None)
-                } else {
-                    std::task::Poll::Ready(Some(Err(Error::SseError(e.to_string()))))
+        loop {
+            match self.as_mut().es.poll_next_unpin(cx) {
+                // Skip synthetic "open": we already get `server.connected` (or equivalent) on the wire;
+                // emitting both duplicated "SSE connected" logs in the host.
+                std::task::Poll::Ready(Some(Ok(Event::Open))) => continue,
+                std::task::Poll::Ready(Some(Ok(Event::Message(msg)))) => {
+                    let event = OpenCodeEvent::parse(&msg.event, &msg.data);
+                    return std::task::Poll::Ready(Some(Ok(event)));
                 }
+                std::task::Poll::Ready(Some(Err(e))) => {
+                    if matches!(e, reqwest_eventsource::Error::StreamEnded) {
+                        return std::task::Poll::Ready(None);
+                    }
+                    return std::task::Poll::Ready(Some(Err(Error::SseError(e.to_string()))));
+                }
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(None),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
             }
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 }

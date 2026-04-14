@@ -24,6 +24,21 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 /// Max log size stored per job (prevents unbounded growth).
 const MAX_LOG_BYTES: usize = 512 * 1024;
 
+/// How many times we try `mise run dev` + health before giving up (with OpenCode repair between tries).
+fn dev_start_max_attempts() -> u32 {
+    std::env::var("STEM_CELL_DEV_START_ATTEMPTS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n| (1..=10).contains(&n))
+        .unwrap_or(3)
+}
+
+const DEV_SERVER_REPAIR_PROMPT: &str = "\
+The local preview runs `mise run dev` and must serve GET /healthz on the port from .mise.toml. \
+A previous attempt failed to become healthy in time. \
+Inspect the repo: fix broken dependencies, config, missing env, port binding, or startup errors so \
+`mise install` and `mise run dev` succeed. Prefer minimal changes; keep the app runnable.";
+
 #[async_trait::async_trait]
 impl SpawnEnvironmentSystem for super::AppSystems {
     async fn execute(
@@ -153,7 +168,7 @@ async fn create_records(
 
         let result = match tokio::time::timeout(
             CONTAINER_TIMEOUT,
-            run_environment(DEFAULT_REPO_URL, job_id, project_id, &bg_pool),
+            run_environment(DEFAULT_REPO_URL, job_id, project_id, message_id, &bg_pool),
         )
         .await
         {
@@ -218,45 +233,111 @@ async fn run_environment(
     repo_url: &str,
     job_id: uuid::Uuid,
     project_id: uuid::Uuid,
+    message_id: uuid::Uuid,
     pool: &sqlx::PgPool,
 ) -> Result<(), String> {
     let mode = std::env::var("SPAWN_MODE").unwrap_or_default();
     if mode == "subprocess" {
-        run_subprocess(repo_url, job_id, project_id, pool).await
+        run_subprocess(repo_url, job_id, project_id, message_id, pool).await
     } else {
-        run_in_container(repo_url, job_id, project_id, pool).await
+        run_in_container(repo_url, job_id, project_id, message_id, pool).await
     }
 }
 
-/// Subprocess mode: clone + build + run directly on the host.
-async fn run_subprocess(
+/// Clone + toolchain install only (idempotent if checkout already exists).
+async fn run_subprocess_setup(
     repo_url: &str,
     job_id: uuid::Uuid,
-    project_id: uuid::Uuid,
-    pool: &sqlx::PgPool,
+    work_dir: &str,
+    port: u16,
 ) -> Result<(), String> {
-    let port = port_for_job(job_id);
-    let work_dir = format!("/tmp/stem-cell-{job_id}");
-
     let script = format!(
         "set -e && \
-         git clone {repo} {dir} && cd {dir} && \
+         if [ -d \"{dir}/.git\" ]; then echo 'repo already cloned'; else git clone {repo} \"{dir}\"; fi && \
+         cd \"{dir}\" && \
          MISE=$( command -v mise || echo ~/.local/bin/mise ) && \
          if [ ! -x \"$MISE\" ]; then \
            curl -fsSL https://mise.run | bash && MISE=~/.local/bin/mise; \
          fi && \
          $MISE trust && \
          sed 's/^PORT = .*/PORT = \"{port}\"/' .mise.toml > .mise.toml.tmp && mv .mise.toml.tmp .mise.toml && \
-         if command -v flock >/dev/null 2>&1; then flock /tmp/mise-install.lock $MISE install --yes; else $MISE install --yes; fi && \
-         $MISE run dev",
+         if command -v flock >/dev/null 2>&1; then flock /tmp/mise-install.lock $MISE install --yes; else $MISE install --yes; fi",
         repo = repo_url,
         dir = work_dir,
         port = port,
     );
 
-    tracing::info!(%repo_url, %port, mode = "subprocess", "starting environment");
+    tracing::info!(%job_id, %repo_url, "subprocess: clone and toolchain install");
+    let status = tokio::process::Command::new("bash")
+        .args(["-c", &script])
+        .env("MISE_YES", "1")
+        .status()
+        .await
+        .map_err(|e| format!("setup script: {e}"))?;
+    if !status.success() {
+        return Err(format!("clone/toolchain setup failed: {status}"));
+    }
+    Ok(())
+}
 
-    spawn_and_serve("bash", &["-c", &script], job_id, project_id, port, pool).await
+/// Subprocess mode: clone + install once, then retry `mise run dev` with OpenCode repair between failures.
+async fn run_subprocess(
+    repo_url: &str,
+    job_id: uuid::Uuid,
+    project_id: uuid::Uuid,
+    message_id: uuid::Uuid,
+    pool: &sqlx::PgPool,
+) -> Result<(), String> {
+    let port = port_for_job(job_id);
+    let work_dir = format!("/tmp/stem-cell-{job_id}");
+
+    run_subprocess_setup(repo_url, job_id, &work_dir, port).await?;
+
+    let dev_script = format!(
+        "set -e && cd \"{dir}\" && \
+         MISE=$( command -v mise || echo ~/.local/bin/mise ) && \
+         $MISE run dev",
+        dir = work_dir,
+    );
+
+    let max_attempts = dev_start_max_attempts();
+    tracing::info!(%repo_url, %port, max_attempts, mode = "subprocess", "starting environment (dev loop)");
+
+    let mut last_err = String::from("no dev attempts");
+    for attempt in 0..max_attempts {
+        tracing::info!(%job_id, attempt = attempt + 1, max = max_attempts, "dev server start attempt");
+        match spawn_and_serve(
+            "bash",
+            &["-c", &dev_script],
+            job_id,
+            project_id,
+            port,
+            pool,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last_err = e;
+                tracing::warn!(
+                    %job_id,
+                    attempt = attempt + 1,
+                    error = %last_err,
+                    "dev server did not become healthy"
+                );
+                if attempt + 1 < max_attempts {
+                    tracing::info!(%job_id, "running OpenCode repair before next dev attempt");
+                    if let Err(rep) =
+                        run_opencode_repair_pass(pool, project_id, message_id, attempt + 1).await
+                    {
+                        tracing::warn!(%job_id, error = %rep, "OpenCode repair failed; retrying dev anyway");
+                    }
+                }
+            }
+        }
+    }
+
+    Err(last_err)
 }
 
 /// Container mode: runs the build inside an isolated container.
@@ -264,6 +345,7 @@ async fn run_in_container(
     repo_url: &str,
     job_id: uuid::Uuid,
     project_id: uuid::Uuid,
+    _message_id: uuid::Uuid,
     pool: &sqlx::PgPool,
 ) -> Result<(), String> {
     let runtime = detect_runtime().await?;
@@ -541,8 +623,8 @@ async fn stream_until_exit(
         flush_logs(pool, job_id, log_buf).await;
     }
 
-    let _ = child.wait().await;
-    tracing::info!(%job_id, %exit_pid, "child process exited");
+    let exit_status = child.wait().await.ok();
+    tracing::info!(%job_id, %exit_pid, ?exit_status, "child process exited");
 
     // Only mark stopped if this process is still the one recorded (avoids racing a deploy restart).
     if exit_pid >= 0 {
@@ -673,21 +755,66 @@ pub(super) async fn restart_deployment_after_opencode_build(
         dir = work_dir,
     );
 
-    let mut child = match tokio::process::Command::new("bash")
-        .args(["-c", &script])
+    let msg_id = spawn_message_id_for_project(pool, project_id).await;
+    let max_attempts = dev_start_max_attempts();
+    let mut last_err = String::from("deploy restart: no attempts");
+
+    for attempt in 0..max_attempts {
+        if attempt > 0 {
+            tracing::info!(%deployment_id, attempt = attempt + 1, "deploy restart: OpenCode repair before retry");
+            if let Some(mid) = msg_id {
+                if let Err(e) = run_opencode_repair_pass(pool, project_id, mid, attempt).await {
+                    tracing::warn!(%deployment_id, error = %e, "deploy restart: repair pass failed");
+                }
+            }
+        }
+
+        match restart_dev_single_attempt(
+            pool,
+            deployment_id,
+            spawn_job_id,
+            port,
+            &script,
+        )
+        .await
+        {
+            Ok(()) => {
+                tracing::info!(%deployment_id, "deploy restart complete");
+                return;
+            }
+            Err(e) => {
+                last_err = e;
+                tracing::warn!(
+                    %deployment_id,
+                    attempt = attempt + 1,
+                    max = max_attempts,
+                    error = %last_err,
+                    "deploy restart attempt failed"
+                );
+            }
+        }
+    }
+
+    tracing::error!(%deployment_id, error = %last_err, "deploy restart exhausted attempts");
+}
+
+/// One `mise run dev` + health wait + attach log stream (existing deployment row).
+async fn restart_dev_single_attempt(
+    pool: &sqlx::PgPool,
+    deployment_id: uuid::Uuid,
+    spawn_job_id: uuid::Uuid,
+    port: u16,
+    script: &str,
+) -> Result<(), String> {
+    let mut child = tokio::process::Command::new("bash")
+        .args(["-c", script])
         .env("MISE_YES", "1")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(%deployment_id, error = %e, "deploy restart: spawn failed");
-            return;
-        }
-    };
+        .map_err(|e| format!("spawn failed: {e}"))?;
 
-    tracing::info!(%deployment_id, %port, "deploy restart: new dev process spawned");
+    tracing::info!(%deployment_id, %port, "deploy restart: dev process spawned");
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -745,15 +872,15 @@ pub(super) async fn restart_deployment_after_opencode_build(
             }
             _ = health_timer.tick() => {
                 if tokio::time::Instant::now() > health_deadline {
-                    if dirty { flush_logs(pool, spawn_job_id, &log_buf).await; }
+                    if dirty {
+                        flush_logs(pool, spawn_job_id, &log_buf).await;
+                    }
                     let _ = child.kill().await;
-                    tracing::error!(%deployment_id, "deploy restart: health check timed out");
-                    return;
+                    return Err("health check timed out".into());
                 }
                 if let Ok(resp) = http.get(&health_url).send().await
                     && resp.status().is_success()
                 {
-                    tracing::info!(%deployment_id, %port, "deploy restart: child server is healthy");
                     if dirty {
                         flush_logs(pool, spawn_job_id, &log_buf).await;
                     }
@@ -769,9 +896,8 @@ pub(super) async fn restart_deployment_after_opencode_build(
                     .execute(pool)
                     .await
                     {
-                        tracing::error!(%deployment_id, error = %e, "deploy restart: failed to record pid");
                         let _ = child.kill().await;
-                        return;
+                        return Err(format!("record pid: {e}"));
                     }
 
                     let bg_pool = pool.clone();
@@ -788,8 +914,7 @@ pub(super) async fn restart_deployment_after_opencode_build(
                         )
                         .await;
                     });
-                    tracing::info!(%deployment_id, "deploy restart complete");
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -799,31 +924,43 @@ pub(super) async fn restart_deployment_after_opencode_build(
         flush_logs(pool, spawn_job_id, &log_buf).await;
     }
 
-    let status = match child.wait().await {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(%deployment_id, error = %e, "deploy restart: wait failed");
-            return;
-        }
-    };
-    tracing::error!(%deployment_id, ?status, "deploy restart: dev exited before healthy");
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("wait: {e}"))?;
+    Err(format!("dev exited before healthy: {status}"))
 }
 
-/// Creates a new "opencode" build job and executes RunBuild to transform
-/// the deployed template using the user's prompt via OpenCode.
-async fn trigger_opencode_build(
+/// `message_id` from the original spawn-environment build job (user message), for repair builds.
+async fn spawn_message_id_for_project(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+) -> Option<uuid::Uuid> {
+    let row = sqlx::query(
+        "SELECT message_id FROM build_jobs WHERE project_id = $1 AND model = 'container' \
+         AND deleted_at IS NULL ORDER BY created_at ASC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+    Some(row.get("message_id"))
+}
+
+/// Queue one OpenCode build job and run it to completion (blocks).
+async fn run_one_opencode_build(
     pool: &sqlx::PgPool,
     project_id: uuid::Uuid,
     message_id: uuid::Uuid,
     prompt: &str,
-) {
+) -> Result<crate::system_api::RunBuildOutput, String> {
     let oc_job_id = uuid::Uuid::new_v4();
 
-    if let Err(e) = sqlx::query(
+    sqlx::query(
         "INSERT INTO build_jobs \
              (id, status, prompt_summary, model, tokens_used, error_message, \
               duration_ms, logs, deployment_id, project_id, message_id, created_at, updated_at) \
-         VALUES ($1, 'queued', $2, 'opencode', 0, '', 0, '', NULL, $3, $4, NOW(), NOW())",
+             VALUES ($1, 'queued', $2, 'opencode', 0, '', 0, '', NULL, $3, $4, NOW(), NOW())",
     )
     .bind(oc_job_id)
     .bind(prompt)
@@ -831,12 +968,9 @@ async fn trigger_opencode_build(
     .bind(message_id)
     .execute(pool)
     .await
-    {
-        tracing::error!(%project_id, error = %e, "failed to create OpenCode build job");
-        return;
-    }
+    .map_err(|e| e.to_string())?;
 
-    tracing::info!(%project_id, %oc_job_id, "triggering OpenCode build");
+    tracing::info!(%project_id, %oc_job_id, "OpenCode build job queued");
 
     let input = crate::system_api::RunBuildInput {
         build_job_id: oc_job_id,
@@ -849,17 +983,8 @@ async fn trigger_opencode_build(
     )
     .await
     {
-        Ok(output) => {
-            tracing::info!(
-                %project_id,
-                %oc_job_id,
-                artifacts = output.artifacts_count,
-                tokens = output.tokens_used,
-                "OpenCode build completed"
-            );
-        }
+        Ok(output) => Ok(output),
         Err(e) => {
-            tracing::error!(%project_id, %oc_job_id, error = ?e, "OpenCode build failed");
             let _ = sqlx::query(
                 "UPDATE build_jobs SET status = 'failed', error_message = $2, updated_at = NOW() WHERE id = $1",
             )
@@ -867,6 +992,43 @@ async fn trigger_opencode_build(
             .bind(format!("{e:?}"))
             .execute(pool)
             .await;
+            Err(format!("{e:?}"))
+        }
+    }
+}
+
+async fn run_opencode_repair_pass(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+    message_id: uuid::Uuid,
+    round: u32,
+) -> Result<(), String> {
+    let prompt = format!(
+        "{DEV_SERVER_REPAIR_PROMPT}\n\n(Automated repair round {round} — `mise run dev` did not become healthy.)"
+    );
+    run_one_opencode_build(pool, project_id, message_id, &prompt).await?;
+    Ok(())
+}
+
+/// Creates a new "opencode" build job and executes RunBuild to transform
+/// the deployed template using the user's prompt via OpenCode.
+async fn trigger_opencode_build(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+    message_id: uuid::Uuid,
+    prompt: &str,
+) {
+    match run_one_opencode_build(pool, project_id, message_id, prompt).await {
+        Ok(output) => {
+            tracing::info!(
+                %project_id,
+                artifacts = output.artifacts_count,
+                tokens = output.tokens_used,
+                "OpenCode build completed"
+            );
+        }
+        Err(e) => {
+            tracing::error!(%project_id, error = %e, "OpenCode build failed");
         }
     }
 }

@@ -15,6 +15,17 @@ YAML files. Your editable surface is intentionally small.
 | `frontend/src/pages/index.astro` | Landing page (hand-authored, not generated) |
 | `crates/runtime/src/systems/*.rs` | Implement generated trait stubs (business logic) |
 
+### OpenCode builds and preview lifecycle
+
+Stem Cell runs OpenCode against the project checkout while a **separate** host-managed
+process runs `mise run dev` for the live preview. Template repos (and their own
+`AGENTS.md`) should state that **agents must not start dev servers or assume
+localhost preview URLs** — the host owns that lifecycle.
+
+The server sends a default OpenCode **system** prompt with the same constraints.
+Override with `STEM_CELL_OPENCODE_SYSTEM_PROMPT` (non-empty replaces the default;
+whitespace-only disables the system message).
+
 ### Workflow after spec changes
 
 1. Edit the relevant spec file (`specs/self.yaml` or `specs/systems.yaml`).

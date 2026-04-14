@@ -153,13 +153,14 @@ impl OpenCodeClient {
         session_id: &str,
         parts: Vec<Part>,
         model: Option<&str>,
+        system: Option<&str>,
     ) -> Result<()> {
         let body = SendMessageRequest {
             parts,
             model: model.map(|s| s.to_string()),
             agent: None,
             message_id: None,
-            system: None,
+            system: system.map(|s| s.to_string()),
             no_reply: None,
         };
         let req = self

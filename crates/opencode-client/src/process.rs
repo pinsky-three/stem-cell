@@ -9,6 +9,36 @@ use tokio::sync::RwLock;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Resolved path to the `opencode` binary (cached at first spawn).
+static OPENCODE_BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Resolves the opencode binary. Tries `mise where opencode` first,
+/// then falls back to bare `opencode` on PATH.
+fn resolve_opencode_bin() -> &'static str {
+    OPENCODE_BIN.get_or_init(|| {
+        if let Ok(output) = std::process::Command::new("mise")
+            .args(["where", "opencode"])
+            .output()
+        {
+            if output.status.success() {
+                let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let bin = format!("{dir}/opencode");
+                if std::path::Path::new(&bin).exists() {
+                    tracing::info!(path = %bin, "resolved opencode binary via mise");
+                    return bin;
+                }
+                let bin_in_bin = format!("{dir}/bin/opencode");
+                if std::path::Path::new(&bin_in_bin).exists() {
+                    tracing::info!(path = %bin_in_bin, "resolved opencode binary via mise");
+                    return bin_in_bin;
+                }
+            }
+        }
+        tracing::warn!("could not resolve opencode via mise, falling back to PATH");
+        "opencode".to_string()
+    })
+}
+
 /// Per-project OpenCode server instance.
 struct Instance {
     port: u16,
@@ -115,8 +145,9 @@ impl ProcessManager {
         let port = self.allocate_port().await?;
         tracing::info!(%project_id, port, dir = %work_dir.display(), "spawning OpenCode server");
 
-        let mut cmd = Command::new("mise");
-        cmd.args(["exec", "--", "opencode", "serve", "--port", &port.to_string()])
+        let opencode_bin = resolve_opencode_bin();
+        let mut cmd = Command::new(opencode_bin);
+        cmd.args(["serve", "--port", &port.to_string()])
             .current_dir(work_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -128,7 +159,7 @@ impl ProcessManager {
 
         let child = cmd
             .spawn()
-            .map_err(|e| Error::SpawnFailed(format!("mise exec -- opencode serve: {e}")))?;
+            .map_err(|e| Error::SpawnFailed(format!("{opencode_bin} serve: {e}")))?;
 
         let client = OpenCodeClient::new(port, self.config.server_password.as_deref())?;
 

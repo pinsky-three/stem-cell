@@ -28,10 +28,62 @@ const FORWARDED_ENV_VARS: &[&str] = &[
     "DEEPSEEK_API_KEY",
     "OPENCODE_MODEL",
     "OPENCODE_PROVIDER",
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
     "HOME",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
 ];
+
+/// Known provider env vars → (provider_id, env_var_name).
+/// Used to auto-generate `OPENCODE_CONFIG_CONTENT` when the user sets
+/// a provider key but hasn't provided explicit inline config.
+const PROVIDER_KEY_MAP: &[(&str, &str)] = &[
+    ("openrouter", "OPENROUTER_API_KEY"),
+    ("anthropic", "ANTHROPIC_API_KEY"),
+    ("openai", "OPENAI_API_KEY"),
+    ("google", "GOOGLE_API_KEY"),
+    ("groq", "GROQ_API_KEY"),
+    ("mistral", "MISTRAL_API_KEY"),
+    ("xai", "XAI_API_KEY"),
+    ("deepseek", "DEEPSEEK_API_KEY"),
+];
+
+/// Builds an inline JSON config for OpenCode from environment variables.
+/// Returns `None` if no provider API keys are detected.
+fn build_inline_config(pm_config: &ProcessManagerConfig) -> Option<String> {
+    let mut providers = Vec::new();
+
+    for &(provider_id, env_key) in PROVIDER_KEY_MAP {
+        if std::env::var(env_key).is_ok() {
+            // Use {env:VAR} substitution so the actual key stays in the env,
+            // not baked into the JSON string.
+            providers.push(format!(
+                r#""{provider_id}": {{ "options": {{ "apiKey": "{{env:{env_key}}}" }} }}"#,
+            ));
+        }
+    }
+
+    if providers.is_empty() {
+        return None;
+    }
+
+    let model = pm_config
+        .default_model
+        .clone()
+        .or_else(|| std::env::var("OPENCODE_MODEL").ok());
+
+    let model_line = model
+        .as_deref()
+        .map(|m| format!(r#", "model": "{m}""#))
+        .unwrap_or_default();
+
+    Some(format!(
+        r#"{{ "$schema": "https://opencode.ai/config.json", "provider": {{ {} }}{} }}"#,
+        providers.join(", "),
+        model_line,
+    ))
+}
 
 /// Resolved path to the `opencode` binary (cached at first spawn).
 static OPENCODE_BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -184,6 +236,15 @@ impl ProcessManager {
         for key in FORWARDED_ENV_VARS {
             if let Ok(val) = std::env::var(key) {
                 cmd.env(key, val);
+            }
+        }
+
+        // Auto-generate OPENCODE_CONFIG_CONTENT when a provider API key is
+        // present but the user hasn't set the config content explicitly.
+        if std::env::var("OPENCODE_CONFIG_CONTENT").is_err() {
+            if let Some(config_json) = build_inline_config(&self.config) {
+                tracing::info!("injecting auto-generated OPENCODE_CONFIG_CONTENT");
+                cmd.env("OPENCODE_CONFIG_CONTENT", config_json);
             }
         }
 

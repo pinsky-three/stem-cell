@@ -100,6 +100,26 @@ fn opencode_event_server_connected() {
     assert!(matches!(event, opencode_client::OpenCodeEvent::ServerConnected));
 }
 
+/// Hono `writeSSE({ data })` uses the default SSE event name `message`; the bus type is in JSON.
+#[test]
+fn opencode_event_parse_hono_message_wrapper() {
+    let data = r#"{"type":"message.part.updated","properties":{"part":{"id":"p1","type":"text","text":"hi"}}}"#;
+    let event = opencode_client::OpenCodeEvent::parse("message", data);
+    match event {
+        opencode_client::OpenCodeEvent::MessagePartUpdated { properties } => {
+            assert_eq!(properties["part"]["text"].as_str(), Some("hi"));
+        }
+        _ => panic!("expected MessagePartUpdated, got {event:?}"),
+    }
+}
+
+#[test]
+fn opencode_event_session_idle_is_terminal() {
+    let data = r#"{"type":"session.idle","properties":{"sessionID":"ses_x"}}"#;
+    let event = opencode_client::OpenCodeEvent::parse("message", data);
+    assert!(event.is_terminal());
+}
+
 #[test]
 fn build_event_serialization() {
     let event = opencode_client::BuildEvent::BuildComplete {

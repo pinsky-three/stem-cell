@@ -2,6 +2,7 @@ use crate::error::{Error, Result};
 use crate::types::OpenCodeEvent;
 use futures::stream::Stream;
 use reqwest_eventsource::{Event, EventSource};
+use std::time::Duration;
 
 /// Opens an SSE connection to the OpenCode `/event` endpoint and yields
 /// typed `OpenCodeEvent` values. The stream ends when the server closes
@@ -14,11 +15,21 @@ pub fn subscribe(
     auth_header: Option<String>,
 ) -> Result<impl Stream<Item = Result<OpenCodeEvent>> + Send + Unpin + 'static> {
     let url = format!("{base_url}/event");
-    let mut builder = reqwest::Client::new().get(&url);
+
+    let http = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(0)) // no response timeout for SSE
+        .no_proxy()
+        .build()
+        .map_err(|e| Error::SseError(e.to_string()))?;
+
+    let mut builder = http.get(&url);
     if let Some(ref auth) = auth_header {
         builder = builder.header(reqwest::header::AUTHORIZATION, auth.as_str());
     }
-    let es = EventSource::new(builder).map_err(|e| Error::SseError(e.to_string()))?;
+
+    let mut es = EventSource::new(builder).map_err(|e| Error::SseError(e.to_string()))?;
+    es.set_retry_policy(Box::new(reqwest_eventsource::retry::Never));
 
     Ok(SseStream { es })
 }
@@ -38,7 +49,6 @@ impl Stream for SseStream {
         use futures::stream::StreamExt;
         match self.es.poll_next_unpin(cx) {
             std::task::Poll::Ready(Some(Ok(Event::Open))) => {
-                // Connection opened — yield connected event
                 std::task::Poll::Ready(Some(Ok(OpenCodeEvent::ServerConnected)))
             }
             std::task::Poll::Ready(Some(Ok(Event::Message(msg)))) => {

@@ -53,7 +53,6 @@ impl RunBuildSystem for super::AppSystems {
         let project_id: uuid::Uuid = build_row.get("project_id");
         let build_id: uuid::Uuid = build_row.get("id");
         let prompt: String = build_row.get("prompt_summary");
-        let model: String = build_row.get("model");
         let existing_session: Option<String> = build_row.get("opencode_session_id");
 
         // ── Load project ──────────────────────────────────────
@@ -76,10 +75,13 @@ impl RunBuildSystem for super::AppSystems {
             .await
             .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
 
-        publish_event(project_id, BuildEvent::BuildStatus {
-            job_id: build_id.to_string(),
-            status: "running".to_string(),
-        })
+        publish_event(
+            project_id,
+            BuildEvent::BuildStatus {
+                job_id: build_id.to_string(),
+                status: "running".to_string(),
+            },
+        )
         .await;
 
         // ── Resolve project work dir ──────────────────────────
@@ -89,9 +91,9 @@ impl RunBuildSystem for super::AppSystems {
             .await
             .map_err(|e| RunBuildError::BuildFailed(e))?;
         if !work_dir.exists() {
-            tokio::fs::create_dir_all(&work_dir)
-                .await
-                .map_err(|e| RunBuildError::BuildFailed(format!("mkdir {}: {e}", work_dir.display())))?;
+            tokio::fs::create_dir_all(&work_dir).await.map_err(|e| {
+                RunBuildError::BuildFailed(format!("mkdir {}: {e}", work_dir.display()))
+            })?;
         }
 
         // ── Get or spawn OpenCode server ──────────────────────
@@ -131,106 +133,156 @@ impl RunBuildSystem for super::AppSystems {
         // ── Subscribe to SSE events (background forwarder) ────
         let job_id_str = build_id.to_string();
         let proj_id = project_id;
-        let auth_header = pm
-            .config()
-            .server_password
-            .as_ref()
-            .map(|pw| format!("Basic {}", simple_base64(format!("opencode:{pw}").as_bytes())));
+        let auth_header = pm.config().server_password.as_ref().map(|pw| {
+            format!(
+                "Basic {}",
+                simple_base64(format!("opencode:{pw}").as_bytes())
+            )
+        });
 
-        let event_stream = opencode_client::sse::subscribe(
-            client.base_url().to_owned(),
-            auth_header.clone(),
-        )
-        .map_err(|e| RunBuildError::AiProviderError(e.to_string()))?;
+        tracing::info!(base_url = %client.base_url(), "connecting SSE event stream");
+
+        let event_stream =
+            opencode_client::sse::subscribe(client.base_url().to_owned(), auth_header.clone())
+                .map_err(|e| RunBuildError::AiProviderError(e.to_string()))?;
 
         let pool_bg = pool.clone();
         let build_id_bg = build_id;
         let job_id_bg = job_id_str.clone();
 
+        // Signal from forwarder → main task when SSE is connected
+        let (connected_tx, connected_rx) = tokio::sync::oneshot::channel::<()>();
+
         let forwarder = tokio::spawn(async move {
             use futures::StreamExt;
             let mut stream = std::pin::pin!(event_stream);
             let mut log_buf = String::new();
+            let mut connected_tx = Some(connected_tx);
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(600);
 
-            while let Some(event_result) = stream.next().await {
-                match event_result {
-                    Ok(opencode_client::OpenCodeEvent::MessagePartUpdated { properties }) => {
-                        let text = properties
-                            .get("content")
-                            .and_then(|v| v.get("content"))
-                            .and_then(|v| v.as_str())
-                            .or_else(|| properties.get("text").and_then(|v| v.as_str()))
-                            .unwrap_or("")
-                            .to_string();
-
-                        if !text.is_empty() {
-                            log_buf.push_str(&text);
-                            publish_event(proj_id, BuildEvent::MessageChunk {
-                                job_id: job_id_bg.clone(),
-                                text,
-                            })
-                            .await;
-                        }
-                    }
-                    Ok(opencode_client::OpenCodeEvent::MessageCompleted { .. }) => {
-                        // Flush final logs
-                        if !log_buf.is_empty() {
-                            let _ = sqlx::query(
-                                "UPDATE build_jobs SET logs = $2, updated_at = NOW() WHERE id = $1",
-                            )
-                            .bind(build_id_bg)
-                            .bind(&log_buf)
-                            .execute(&pool_bg)
-                            .await;
-                        }
+            loop {
+                let next = tokio::time::timeout_at(deadline, stream.next()).await;
+                match next {
+                    Err(_) => {
+                        tracing::warn!("SSE forwarder timed out after 10 min");
                         break;
                     }
-                    Ok(opencode_client::OpenCodeEvent::Unknown { raw_type, data }) => {
-                        if raw_type.starts_with("tool.") {
-                            let tool = data
-                                .get("tool")
+                    Ok(None) => {
+                        tracing::info!("SSE stream closed by server");
+                        break;
+                    }
+                    Ok(Some(event_result)) => match event_result {
+                        Ok(opencode_client::OpenCodeEvent::ServerConnected) => {
+                            tracing::info!("SSE connected to OpenCode event stream");
+                            if let Some(tx) = connected_tx.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                        Ok(opencode_client::OpenCodeEvent::MessagePartUpdated {
+                            properties,
+                        }) => {
+                            let text = properties
+                                .get("content")
+                                .and_then(|v| v.get("content"))
                                 .and_then(|v| v.as_str())
-                                .unwrap_or(&raw_type)
+                                .or_else(|| properties.get("text").and_then(|v| v.as_str()))
+                                .unwrap_or("")
                                 .to_string();
-                            publish_event(proj_id, BuildEvent::ToolCall {
-                                job_id: job_id_bg.clone(),
-                                tool,
-                                args: data,
-                            })
-                            .await;
+
+                            if !text.is_empty() {
+                                log_buf.push_str(&text);
+                                publish_event(
+                                    proj_id,
+                                    BuildEvent::MessageChunk {
+                                        job_id: job_id_bg.clone(),
+                                        text,
+                                    },
+                                )
+                                .await;
+                            }
                         }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "SSE stream error");
-                        break;
-                    }
+                        Ok(opencode_client::OpenCodeEvent::MessageCompleted { .. }) => {
+                            tracing::info!("OpenCode message completed, flushing logs");
+                            if !log_buf.is_empty() {
+                                let _ = sqlx::query(
+                                    "UPDATE build_jobs SET logs = $2, updated_at = NOW() WHERE id = $1",
+                                )
+                                .bind(build_id_bg)
+                                .bind(&log_buf)
+                                .execute(&pool_bg)
+                                .await;
+                            }
+                            break;
+                        }
+                        Ok(opencode_client::OpenCodeEvent::Unknown { raw_type, data }) => {
+                            tracing::info!(event_type = %raw_type, "SSE event from OpenCode");
+                            if raw_type.starts_with("tool.") {
+                                let tool = data
+                                    .get("tool")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&raw_type)
+                                    .to_string();
+                                publish_event(
+                                    proj_id,
+                                    BuildEvent::ToolCall {
+                                        job_id: job_id_bg.clone(),
+                                        tool,
+                                        args: data,
+                                    },
+                                )
+                                .await;
+                            }
+                        }
+                        Ok(ev) => {
+                            tracing::info!(?ev, "SSE event (other)");
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "SSE stream error");
+                            break;
+                        }
+                    },
                 }
             }
+            log_buf
         });
 
-        // ── Send the prompt ───────────────────────────────────
-        let oc_model = pm.config().default_model.as_deref().or_else(|| {
-            if model.is_empty() { None } else { Some(model.as_str()) }
-        });
+        // Wait up to 15s for the SSE stream to connect before sending prompt
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            connected_rx,
+        )
+        .await
+        {
+            Ok(Ok(())) => tracing::info!("SSE stream ready, sending prompt"),
+            Ok(Err(_)) => {
+                tracing::warn!("SSE forwarder dropped before connecting, sending prompt anyway");
+            }
+            Err(_) => {
+                tracing::warn!("SSE connect timed out after 15s, sending prompt anyway");
+            }
+        }
 
-        let response = client
-            .send_message(
+        // ── Send the prompt (fire-and-forget) ────────────────
+        let oc_model = pm.config().default_model.as_deref();
+
+        client
+            .prompt_async(
                 &session.id,
-                vec![Part::Text { text: prompt.clone() }],
+                vec![Part::Text {
+                    text: prompt.clone(),
+                }],
                 oc_model,
             )
             .await
             .map_err(|e| RunBuildError::AiProviderError(e.to_string()))?;
 
-        // Wait for the event forwarder to finish
-        let _ = forwarder.await;
+        tracing::info!(session_id = %session.id, "prompt sent, waiting for completion via SSE");
+
+        // Wait for the event forwarder to finish (it breaks on MessageCompleted)
+        let assistant_content = forwarder.await.unwrap_or_default();
 
         // ── Collect diffs as artifacts ─────────────────────────
-        let diffs = client
-            .session_diff(&session.id)
-            .await
-            .unwrap_or_default();
+        let diffs = client.session_diff(&session.id).await.unwrap_or_default();
 
         let mut artifacts_count: i32 = 0;
         for diff in &diffs {
@@ -258,39 +310,18 @@ impl RunBuildSystem for super::AppSystems {
             artifacts_count += 1;
         }
 
-        // ── Extract token count from response ─────────────────
-        let tokens_used: i64 = response
-            .parts
-            .iter()
-            .filter_map(|p| p.get("tokensUsed").and_then(|v| v.as_i64()))
-            .sum::<i64>()
-            .max(0);
-
         let duration_ms = started.elapsed().as_millis() as i64;
+        let tokens_used: i64 = 0; // token tracking not available in async mode
 
         // ── Persist assistant message ─────────────────────────
-        let assistant_content = response
-            .parts
-            .iter()
-            .filter_map(|p| {
-                if p.get("type").and_then(|v| v.as_str()) == Some("text") {
-                    p.get("text").and_then(|v| v.as_str()).map(String::from)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
         if !assistant_content.is_empty() {
             let message_id: uuid::Uuid = build_row.get("message_id");
-            let conv_row = sqlx::query(
-                "SELECT conversation_id, author_id FROM messages WHERE id = $1",
-            )
-            .bind(message_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
+            let conv_row =
+                sqlx::query("SELECT conversation_id, author_id FROM messages WHERE id = $1")
+                    .bind(message_id)
+                    .fetch_optional(pool)
+                    .await
+                    .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
 
             if let Some(conv) = conv_row {
                 let conversation_id: uuid::Uuid = conv.get("conversation_id");
@@ -335,19 +366,25 @@ impl RunBuildSystem for super::AppSystems {
         )
         .bind(uuid::Uuid::new_v4())
         .bind(tokens_used)
-        .bind(format!("Build job {} — {} artifacts", build_id, artifacts_count))
+        .bind(format!(
+            "Build job {} — {} artifacts",
+            build_id, artifacts_count
+        ))
         .bind(org_id)
         .bind(project_id)
         .execute(pool)
         .await
         .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
 
-        publish_event(project_id, BuildEvent::BuildComplete {
-            job_id: build_id.to_string(),
-            status: "succeeded".to_string(),
-            artifacts_count,
-            tokens_used,
-        })
+        publish_event(
+            project_id,
+            BuildEvent::BuildComplete {
+                job_id: build_id.to_string(),
+                status: "succeeded".to_string(),
+                artifacts_count,
+                tokens_used,
+            },
+        )
         .await;
 
         tracing::info!(
@@ -413,8 +450,8 @@ async fn resolve_work_dir_for_project(
         .map(|r| r.get("slug"))
         .unwrap_or_else(|| project_id.to_string());
 
-    let base = std::env::var("OPENCODE_WORKDIR_BASE")
-        .unwrap_or_else(|_| "/tmp/stem-cell-projects".into());
+    let base =
+        std::env::var("OPENCODE_WORKDIR_BASE").unwrap_or_else(|_| "/tmp/stem-cell-projects".into());
     Ok(std::path::PathBuf::from(base).join(slug))
 }
 

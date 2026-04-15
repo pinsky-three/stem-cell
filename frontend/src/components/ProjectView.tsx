@@ -264,18 +264,47 @@ function ThinkingBubble({
 
 // ── Chat panel ──────────────────────────────────────────────────────────
 
+function DemoLimitBanner() {
+  return (
+    <div className="border-t border-amber-900/40 bg-amber-950/30 px-4 py-3">
+      <div className="flex items-center gap-2 text-amber-400/90">
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          className="shrink-0"
+        >
+          <path d="M8 1.5l6.5 12H1.5z" />
+          <path d="M8 6v3" />
+          <circle cx="8" cy="11.5" r="0.5" fill="currentColor" />
+        </svg>
+        <span className="text-xs font-medium">
+          Free demo limit reached — upgrade to keep building.
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function ChatPanel({
   messages,
   onSend,
   isLoading,
   thinkingSteps,
   streamingText,
+  demoLimitReached,
 }: {
   messages: Message[];
   onSend: (msg: string) => void;
   isLoading: boolean;
   thinkingSteps: ThinkingStep[];
   streamingText: string;
+  demoLimitReached: boolean;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -314,13 +343,17 @@ function ChatPanel({
         )}
         <div ref={bottomRef} />
       </div>
-      <div className="border-t border-neutral-800 p-3">
-        <PromptInputBox
-          placeholder="Send a message…"
-          onSend={(msg) => onSend(msg)}
-          isLoading={isLoading}
-        />
-      </div>
+      {demoLimitReached ? (
+        <DemoLimitBanner />
+      ) : (
+        <div className="border-t border-neutral-800 p-3">
+          <PromptInputBox
+            placeholder="Send a message…"
+            onSend={(msg) => onSend(msg)}
+            isLoading={isLoading}
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -723,9 +756,27 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   const [previewStatusDetail, setPreviewStatusDetail] = useState<string | null>(
     null,
   );
+  const [projectScope, setProjectScope] = useState<string>("frontend");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
+
+  const demoLimitReached = projectScope === "free";
+
+  const fetchProjectScope = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/projects/${projectId}`);
+      if (!res.ok) return;
+      const data: { scope?: string } = await res.json();
+      if (data.scope) setProjectScope(data.scope);
+    } catch {
+      /* ignore */
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    fetchProjectScope();
+  }, [fetchProjectScope]);
 
   const stopPolling = useCallback(() => {
     if (timerRef.current) {
@@ -861,6 +912,8 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         );
         setIsLoading(false);
 
+        fetchProjectScope();
+
         if (data.job_id) {
           scheduleBuildJobRefetches(data.job_id, setJob);
           stopPolling();
@@ -915,7 +968,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [projectId, startPolling, stopPolling]);
+  }, [projectId, startPolling, stopPolling, fetchProjectScope]);
 
   useEffect(() => stopPolling, [stopPolling]);
 
@@ -1001,6 +1054,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   const handleSend = async (content: string) => {
+    if (demoLimitReached) return;
     const optimistic: Message = {
       id: crypto.randomUUID(),
       role: "user",
@@ -1072,6 +1126,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
                 isLoading={isLoading}
                 thinkingSteps={thinkingSteps}
                 streamingText={streamingText}
+                demoLimitReached={demoLimitReached}
               />
             ) : (
               <LogViewer logs={job?.logs ?? ""} />

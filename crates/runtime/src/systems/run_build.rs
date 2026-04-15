@@ -539,6 +539,19 @@ impl RunBuildSystem for super::AppSystems {
         .await
         .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
 
+        // ── Demo gate: mark project scope as "free" after first real build ──
+        if model != "opencode-repair" {
+            sqlx::query(
+                "UPDATE projects SET scope = 'free', updated_at = NOW() \
+                 WHERE id = $1 AND scope != 'free'",
+            )
+            .bind(project_id)
+            .execute(pool)
+            .await
+            .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
+            tracing::info!(%project_id, "project scope set to 'free' (demo limit)");
+        }
+
         // ── Record usage ──────────────────────────────────────
         sqlx::query(
             "INSERT INTO usage_records \

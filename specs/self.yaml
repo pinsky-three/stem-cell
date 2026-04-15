@@ -94,6 +94,8 @@ entities:
       - { name: "status",      type: "string", required: true }
       - { name: "framework",   type: "string", required: false }
       - { name: "visibility",  type: "string", required: true }
+      # `frontend` = Astro-only preview + OpenCode constrained to `frontend/src/`; `full` = spec + Rust stack.
+      - { name: "scope",       type: "string", required: true }
       - { name: "active",      type: "bool",   required: true }
       - name: "org_id"
         type: "uuid"

@@ -30,8 +30,8 @@ pub fn process_manager() -> &'static opencode_client::ProcessManager {
         .expect("ProcessManager not initialized — call init_process_manager in main")
 }
 
-/// Default system text for OpenCode: file edits only; host owns dev/preview lifecycle.
-const OPENCODE_BUILD_SYSTEM_DEFAULT: &str = concat!(
+/// Default system text for OpenCode (full stack): file edits only; host owns dev/preview lifecycle.
+const OPENCODE_BUILD_SYSTEM_FULL: &str = concat!(
     "You are editing a repository checkout managed by an external host.\n",
     "\n",
     "Rules:\n",
@@ -46,13 +46,44 @@ const OPENCODE_BUILD_SYSTEM_DEFAULT: &str = concat!(
     "and serves correctly.",
 );
 
+/// Free-tier / frontend-only projects: constrain edits to the Astro tree.
+const OPENCODE_BUILD_SYSTEM_FRONTEND: &str = concat!(
+    "You are editing a repository checkout managed by an external host.\n",
+    "\n",
+    "Rules:\n",
+    "- You may **only** change files under `frontend/src/`. Do not modify Rust crates, ",
+    "`specs/`, SQL, backend routes, `Cargo.toml`, or anything outside `frontend/src/`.\n",
+    "- Make file edits only. Do not start long-lived processes: no `mise run dev`, ",
+    "`npm run dev`, `vite`, `astro dev`, or similar preview servers; the host starts ",
+    "and owns the dev server lifecycle.\n",
+    "- Do not tell the user to open localhost URLs for preview; the host manages that.\n",
+    "- Be concise. Do not repeat the same explanation or plan twice in one reply.\n",
+    "- Avoid broad process-killing commands (e.g. killing all node processes) that could ",
+    "stop the host-managed dev server.\n",
+    "- You may fix frontend files so that when the host runs `mise run frontend:dev`, ",
+    "the Astro app builds and serves correctly.",
+);
+
+fn effective_project_scope(raw: &str) -> &'static str {
+    match raw {
+        "full" => "full",
+        _ => "frontend",
+    }
+}
+
 /// If `STEM_CELL_OPENCODE_SYSTEM_PROMPT` is set and non-empty after trim, it replaces the
 /// default; if set to whitespace-only, no system message is sent.
-fn opencode_build_system_prompt() -> Option<String> {
+fn opencode_build_system_prompt(project_scope_raw: &str) -> Option<String> {
     match std::env::var("STEM_CELL_OPENCODE_SYSTEM_PROMPT") {
         Ok(s) if !s.trim().is_empty() => Some(s),
         Ok(_) => None,
-        Err(_) => Some(OPENCODE_BUILD_SYSTEM_DEFAULT.to_string()),
+        Err(_) => {
+            let body = match effective_project_scope(project_scope_raw) {
+                "full" => OPENCODE_BUILD_SYSTEM_FULL,
+                _ => OPENCODE_BUILD_SYSTEM_FRONTEND,
+            };
+            Some(body.to_string())
+        }
     }
 }
 
@@ -80,11 +111,12 @@ impl RunBuildSystem for super::AppSystems {
         let project_id: uuid::Uuid = build_row.get("project_id");
         let build_id: uuid::Uuid = build_row.get("id");
         let prompt: String = build_row.get("prompt_summary");
+        let model: String = build_row.get("model");
         let existing_session: Option<String> = build_row.get("opencode_session_id");
 
         // ── Load project ──────────────────────────────────────
         let project_row = sqlx::query(
-            "SELECT id, slug, org_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
+            "SELECT id, slug, org_id, scope FROM projects WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(project_id)
         .fetch_optional(pool)
@@ -93,6 +125,7 @@ impl RunBuildSystem for super::AppSystems {
         .ok_or(RunBuildError::ProjectNotFound)?;
 
         let org_id: uuid::Uuid = project_row.get("org_id");
+        let project_scope: String = project_row.get("scope");
         let started = std::time::Instant::now();
 
         // ── Mark as running ───────────────────────────────────
@@ -399,7 +432,7 @@ impl RunBuildSystem for super::AppSystems {
         // Model is configured server-side via OPENCODE_CONFIG_CONTENT;
         // the per-request model field uses a different format (object)
         // and is only needed for overrides, so we omit it.
-        let oc_system = opencode_build_system_prompt();
+        let oc_system = opencode_build_system_prompt(project_scope.as_str());
         client
             .prompt_async(
                 &session.id,
@@ -535,13 +568,22 @@ impl RunBuildSystem for super::AppSystems {
         )
         .await;
 
-        super::spawn_environment::restart_deployment_after_opencode_build(pool, project_id).await;
+        if model != "opencode-repair" {
+            super::spawn_environment::restart_deployment_after_opencode_build(pool, project_id)
+                .await;
+        } else {
+            tracing::debug!(
+                %project_id,
+                "skip deploy restart after opencode-repair — outer restart loop owns recovery"
+            );
+        }
 
         tracing::info!(
             artifacts_count,
             tokens_used,
             duration_ms,
             session_id = %session.id,
+            model = %model,
             "build completed via OpenCode"
         );
 

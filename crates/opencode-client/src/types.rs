@@ -252,4 +252,12 @@ pub enum BuildEvent {
         job_id: String,
         error: String,
     },
+    /// Deploy lifecycle phases (clone, install, healthy, opencode_starting).
+    /// Emitted by SpawnEnvironment so the frontend can show progress before OpenCode begins.
+    DeployStatus {
+        job_id: String,
+        project_id: String,
+        phase: String,
+        message: String,
+    },
 }

@@ -26,6 +26,7 @@ import Base from "../../layouts/Base.astro";
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">status</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">framework</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">visibility</th>
+          <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">scope</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">active</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">org_id</th>
           <th class="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-neutral-400">creator_id</th>
@@ -53,6 +54,8 @@ import Base from "../../layouts/Base.astro";
         <input type="text" name="framework" placeholder="framework"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" />
         <input type="text" name="visibility" placeholder="visibility"
+              class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
+        <input type="text" name="scope" placeholder="scope"
               class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500" required />
         <label class="flex items-center gap-2 text-sm">
               <input type="checkbox" name="active" class="rounded border-neutral-600 bg-neutral-800 text-indigo-500 focus:ring-indigo-500" />
@@ -97,6 +100,7 @@ import Base from "../../layouts/Base.astro";
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.status??'—'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.framework??'—'}</td>`+
         `<td class="px-4 py-3 text-sm text-neutral-300">${r.visibility??'—'}</td>`+
+        `<td class="px-4 py-3 text-sm text-neutral-300">${r.scope??'—'}</td>`+
         `<td class="px-4 py-3 text-sm">${r.active?'<span class="text-green-400">yes</span>':'<span class="text-red-400">no</span>'}</td>`+
         `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/organizations" class="text-indigo-400 hover:underline">${r.org_id?r.org_id.substring(0,8)+'...':'—'}</a></td>`+
         `<td class="px-4 py-3 font-mono text-xs"><a href="/admin/users" class="text-indigo-400 hover:underline">${r.creator_id?r.creator_id.substring(0,8)+'...':'—'}</a></td>` +
@@ -131,6 +135,7 @@ import Base from "../../layouts/Base.astro";
         status: form.elements['status'].value,
         framework: form.elements['framework'].value || null,
         visibility: form.elements['visibility'].value,
+        scope: form.elements['scope'].value,
         active: form.elements['active'].checked,
         org_id: form.elements['org_id'].value,
         creator_id: form.elements['creator_id'].value
@@ -157,6 +162,7 @@ import Base from "../../layouts/Base.astro";
       form.elements['status'].value = item.status ?? '';
       form.elements['framework'].value = item.framework ?? '';
       form.elements['visibility'].value = item.visibility ?? '';
+      form.elements['scope'].value = item.scope ?? '';
       form.elements['active'].checked = item.active;
       form.elements['org_id'].value = item.org_id ?? '';
       form.elements['creator_id'].value = item.creator_id ?? '';

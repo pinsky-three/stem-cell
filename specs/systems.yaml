@@ -81,6 +81,7 @@ systems:
           - { field: "status",      value: "active" }
           - { field: "framework",   from: "input.framework" }
           - { field: "visibility",  value: "private" }
+          - { field: "scope",       value: "frontend" }
           - { field: "active",      value: true }
           - { field: "org_id",      from: "input.org_id" }
           - { field: "creator_id",  from: "input.creator_id" }

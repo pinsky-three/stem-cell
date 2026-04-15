@@ -1,4 +1,5 @@
 use crate::system_api::*;
+use opencode_client::types::BuildEvent;
 use sqlx::Row;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -24,6 +25,9 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 /// Max log size stored per job (prevents unbounded growth).
 const MAX_LOG_BYTES: usize = 512 * 1024;
 
+/// Characters of combined stdout/stderr tail included in “exited before healthy” errors + `tracing::error`.
+const PREVIEW_EXIT_LOG_TAIL_CHARS: usize = 4096;
+
 /// How many times we try `mise run dev` + health before giving up (with OpenCode repair between tries).
 fn dev_start_max_attempts() -> u32 {
     std::env::var("STEM_CELL_DEV_START_ATTEMPTS")
@@ -33,11 +37,136 @@ fn dev_start_max_attempts() -> u32 {
         .unwrap_or(3)
 }
 
-const DEV_SERVER_REPAIR_PROMPT: &str = "\
+/// Normalize DB `projects.scope` (empty string from legacy additive migration → frontend).
+fn effective_preview_scope(raw: &str) -> &'static str {
+    match raw {
+        "full" => "full",
+        _ => "frontend",
+    }
+}
+
+/// Bash fragment after `MISE=…` is set: brings preview up. Frontend runs **`frontend:install`**
+/// before **`frontend:dev`** so `node_modules/.bin/astro` exists (clone + `mise install` does not run npm).
+fn mise_preview_command_chain(scope_effective: &str) -> &'static str {
+    match scope_effective {
+        "full" => "\"$MISE\" run dev",
+        _ => "\"$MISE\" run frontend:install && \"$MISE\" run frontend:dev",
+    }
+}
+
+fn preview_commands_label(scope_effective: &str) -> &'static str {
+    match scope_effective {
+        "full" => "mise run dev",
+        _ => "mise run frontend:install && mise run frontend:dev",
+    }
+}
+
+/// Container bootstrap uses a fixed mise path (no `$MISE` in that script).
+fn container_mise_preview_chain(scope_effective: &str) -> &'static str {
+    match scope_effective {
+        "full" => "~/.local/bin/mise run dev",
+        _ => "~/.local/bin/mise run frontend:install && ~/.local/bin/mise run frontend:dev",
+    }
+}
+
+/// Heuristic: log immediately at WARN so failures like `astro: command not found` show up before health timeout.
+fn preview_log_line_smells_fatal(line: &str) -> bool {
+    let s = line.to_ascii_lowercase();
+    s.contains("command not found")
+        || s.contains("npm err")
+        || s.contains("error task failed")
+        || s.contains("elifecycle")
+        || s.contains("eaddrinuse")
+        || s.contains("enoent")
+        || s.contains("cannot find module")
+        || s.contains("failed to resolve")
+        || s.contains("failed to load")
+        || s.contains("is not recognized as an internal or external command")
+        || (s.contains("error:") && (s.contains("astro") || s.contains("vite") || s.contains("esbuild")))
+}
+
+async fn publish_deploy_status(
+    project_id: uuid::Uuid,
+    job_id: uuid::Uuid,
+    phase: &str,
+    message: &str,
+) {
+    let event = BuildEvent::DeployStatus {
+        job_id: job_id.to_string(),
+        project_id: project_id.to_string(),
+        phase: phase.to_string(),
+        message: message.to_string(),
+    };
+    let bus = super::run_build::event_bus();
+    let readers = bus.read().await;
+    if let Some(tx) = readers.get(&project_id) {
+        let _ = tx.send(event);
+    }
+}
+
+fn preview_log_tail_for_error(log_buf: &str) -> String {
+    if log_buf.len() <= PREVIEW_EXIT_LOG_TAIL_CHARS {
+        return log_buf.to_string();
+    }
+    log_buf
+        .chars()
+        .rev()
+        .take(PREVIEW_EXIT_LOG_TAIL_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect()
+}
+
+/// Instructions embedded in OpenCode repair prompts — must match actual dev task + health URL.
+fn dev_server_repair_body(scope_raw: &str) -> &'static str {
+    match effective_preview_scope(scope_raw) {
+        "full" => "\
 The local preview runs `mise run dev` and must serve GET /healthz on the port from .mise.toml. \
 A previous attempt failed to become healthy in time. \
 Inspect the repo: fix broken dependencies, config, missing env, port binding, or startup errors so \
-`mise install` and `mise run dev` succeed. Prefer minimal changes; keep the app runnable.";
+`mise install` and `mise run dev` succeed. Prefer minimal changes; keep the app runnable.",
+        _ => "\
+The host runs `mise run frontend:install` then `mise run frontend:dev` (Astro in `frontend/`). The preview must respond with HTTP 200 \
+on GET / at the port from .mise.toml. \
+A previous attempt failed to become healthy in time. \
+Inspect the repo: fix broken frontend dependencies, Astro config, missing env, port binding, or startup errors so \
+`mise install`, `mise run frontend:install`, and `mise run frontend:dev` succeed. Prefer minimal changes under `frontend/src/`; keep the preview runnable.",
+    }
+}
+
+async fn fetch_project_scope_raw(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+) -> Result<String, String> {
+    let row = sqlx::query(
+        "SELECT scope FROM projects WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "project not found".to_string())?;
+    Ok(row.get::<String, _>("scope"))
+}
+
+/// True if an OpenCode primary or repair job is already queued or running for this project.
+async fn has_active_opencode_job(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+) -> Result<bool, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT 1 AS x FROM build_jobs \
+         WHERE project_id = $1 AND deleted_at IS NULL \
+           AND model IN ('opencode', 'opencode-repair') \
+           AND status IN ('queued', 'running') \
+         LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
+}
 
 /// Dev servers run as `bash -c '… mise run dev'`. Without a dedicated process group, `kill` only
 /// hits bash and node/vite can keep listening → **Address already in use** on restart.
@@ -161,6 +290,15 @@ async fn append_prompt_and_queue_opencode(
         ));
     }
 
+    if has_active_opencode_job(pool, project_id)
+        .await
+        .map_err(|e| SpawnEnvironmentError::DatabaseError(e.to_string()))?
+    {
+        return Err(SpawnEnvironmentError::SpawnFailed(
+            "A build is already in progress for this project — wait for it to finish.".into(),
+        ));
+    }
+
     let conv_row = sqlx::query(
         "SELECT id FROM conversations \
          WHERE project_id = $1 AND deleted_at IS NULL \
@@ -213,6 +351,7 @@ async fn append_prompt_and_queue_opencode(
         message_id,
         &input.prompt,
         seed_session.as_deref(),
+        "opencode",
     )
     .await
     .map_err(|e| SpawnEnvironmentError::DatabaseError(e.to_string()))?;
@@ -294,9 +433,9 @@ async fn create_records(
 
     sqlx::query(
         "INSERT INTO projects \
-             (id, name, slug, description, status, framework, visibility, active, \
+             (id, name, slug, description, status, framework, visibility, scope, active, \
               org_id, creator_id, created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, 'active', NULL, 'private', true, $5, $6, NOW(), NOW())",
+         VALUES ($1, $2, $3, $4, 'active', NULL, 'private', 'frontend', true, $5, $6, NOW(), NOW())",
     )
     .bind(project_id)
     .bind(&input.prompt)
@@ -354,6 +493,8 @@ async fn create_records(
     tokio::spawn(async move {
         let started = std::time::Instant::now();
 
+        publish_deploy_status(project_id, job_id, "cloning", "Cloning template repository…").await;
+
         let result = match tokio::time::timeout(
             CONTAINER_TIMEOUT,
             run_environment(DEFAULT_REPO_URL, job_id, project_id, message_id, &bg_pool),
@@ -373,6 +514,7 @@ async fn create_records(
             Ok(()) => ("succeeded", String::new()),
             Err(e) => {
                 tracing::error!(%job_id, error = %e, "environment failed");
+                publish_deploy_status(project_id, job_id, "failed", &e).await;
                 ("failed", e)
             }
         };
@@ -394,10 +536,15 @@ async fn create_records(
 
         tracing::info!(%job_id, %status, duration_ms, "environment task finished");
 
-        // ── Trigger OpenCode transformation ──────────────────────
-        // After the template is deployed, create a new build job and run
-        // OpenCode to transform the code based on the user's prompt.
         if status == "succeeded" {
+            publish_deploy_status(
+                project_id,
+                job_id,
+                "opencode_starting",
+                "Preview is live — starting AI transformation…",
+            )
+            .await;
+
             trigger_opencode_build(
                 &bg_pool,
                 project_id,
@@ -487,18 +634,38 @@ async fn run_subprocess(
     let port = port_for_job(job_id);
     let work_dir = format!("/tmp/stem-cell-{job_id}");
 
+    publish_deploy_status(project_id, job_id, "installing", "Installing toolchain…").await;
     run_subprocess_setup(repo_url, job_id, &work_dir, port).await?;
+    publish_deploy_status(project_id, job_id, "starting", "Starting preview server…").await;
+
+    let scope_raw = fetch_project_scope_raw(pool, project_id).await?;
+    let scope_eff = effective_preview_scope(scope_raw.as_str());
+    let mise_chain = mise_preview_command_chain(scope_eff);
+    let health_path = match scope_eff {
+        "full" => "/healthz",
+        _ => "/",
+    };
 
     let dev_script = format!(
         "set -e && cd \"{dir}\" && export PORT={port} && \
          MISE=$( command -v mise || echo ~/.local/bin/mise ) && \
-         \"$MISE\" run dev",
+         {mise_chain}",
         dir = work_dir,
         port = port,
+        mise_chain = mise_chain,
     );
 
     let max_attempts = dev_start_max_attempts();
-    tracing::info!(%repo_url, %port, max_attempts, mode = "subprocess", "starting environment (dev loop)");
+    tracing::info!(
+        %repo_url,
+        %port,
+        max_attempts,
+        scope = %scope_raw,
+        preview = preview_commands_label(scope_eff),
+        %health_path,
+        mode = "subprocess",
+        "starting environment (dev loop)"
+    );
 
     let mut last_err = String::from("no dev attempts");
     for attempt in 0..max_attempts {
@@ -510,6 +677,8 @@ async fn run_subprocess(
             project_id,
             port,
             pool,
+            health_path,
+            preview_commands_label(scope_eff),
         )
         .await
         {
@@ -549,6 +718,24 @@ async fn run_in_container(
     let runtime = detect_runtime().await?;
     let port = port_for_job(job_id);
 
+    // Subprocess mode publishes installing/starting before the dev child; container mode used to
+    // only emit "cloning" then go silent for minutes while Docker runs apt/clone/mise/npm.
+    publish_deploy_status(
+        project_id,
+        job_id,
+        "installing",
+        "Container preview: image pull, OS packages, git clone, mise, and npm — often 2–5 min the first time.",
+    )
+    .await;
+
+    let scope_raw = fetch_project_scope_raw(pool, project_id).await?;
+    let scope_eff = effective_preview_scope(scope_raw.as_str());
+    let container_chain = container_mise_preview_chain(scope_eff);
+    let health_path = match scope_eff {
+        "full" => "/healthz",
+        _ => "/",
+    };
+
     let script = format!(
         "apt-get update && apt-get install -y --no-install-recommends \
              git curl ca-certificates build-essential pkg-config libssl-dev && \
@@ -564,12 +751,30 @@ async fn run_in_container(
          fi && \
          export PORT={port} && \
          ~/.local/bin/mise install --yes && \
-         ~/.local/bin/mise run dev",
+         {container_chain}",
         repo = repo_url,
         port = port,
+        container_chain = container_chain,
     );
 
-    tracing::info!(%repo_url, %runtime, %port, mode = "container", "starting environment");
+    tracing::info!(
+        %repo_url,
+        %runtime,
+        %port,
+        scope = %scope_raw,
+        preview = preview_commands_label(scope_eff),
+        %health_path,
+        mode = "container",
+        "starting environment"
+    );
+
+    publish_deploy_status(
+        project_id,
+        job_id,
+        "starting",
+        "Starting container and dev server…",
+    )
+    .await;
 
     spawn_and_serve(
         runtime,
@@ -587,6 +792,8 @@ async fn run_in_container(
         project_id,
         port,
         pool,
+        health_path,
+        preview_commands_label(scope_eff),
     )
     .await
 }
@@ -630,7 +837,8 @@ async fn flush_logs(pool: &sqlx::PgPool, job_id: uuid::Uuid, logs: &str) {
 // ── Spawn, stream logs, wait for healthy, create deployment ────────────
 
 /// Spawns a long-running child process (the dev server), streams its logs,
-/// polls `/healthz` until the server is up, then creates a Deployment record.
+/// polls `health_path` (e.g. `/healthz` for full stack, `/` for Astro-only) until the server is up,
+/// then creates a Deployment record.
 /// Returns Ok(()) once healthy (the process keeps running in the background).
 async fn spawn_and_serve(
     program: &str,
@@ -639,7 +847,22 @@ async fn spawn_and_serve(
     project_id: uuid::Uuid,
     port: u16,
     pool: &sqlx::PgPool,
+    health_path: &str,
+    preview_label: &str,
 ) -> Result<(), String> {
+    let cmd_hint: String = args
+        .windows(2)
+        .find(|w| w[0] == "-c")
+        .map(|w| {
+            let c = w[1];
+            let mut t: String = c.chars().take(400).collect();
+            if c.len() > 400 {
+                t.push_str(&format!("… ({} chars total)", c.len()));
+            }
+            t
+        })
+        .unwrap_or_else(|| program.to_string());
+
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .env("MISE_YES", "1")
@@ -652,7 +875,17 @@ async fn spawn_and_serve(
         .map_err(|e| format!("failed to start {program}: {e}"))?;
 
     let pid = child.id().unwrap_or(0);
-    tracing::info!(%job_id, %pid, %port, "child process spawned");
+    let health_url = format!("http://127.0.0.1:{port}{health_path}");
+    tracing::info!(
+        %job_id,
+        %pid,
+        %port,
+        %health_url,
+        preview = %preview_label,
+        program,
+        cmd_hint = %cmd_hint,
+        "preview child spawned — streaming logs until healthy or exit"
+    );
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -664,10 +897,10 @@ async fn spawn_and_serve(
     let mut flush_timer = tokio::time::interval(LOG_FLUSH_INTERVAL);
     flush_timer.tick().await;
 
-    let health_url = format!("http://127.0.0.1:{port}/healthz");
     let mut health_timer = tokio::time::interval(HEALTH_POLL_INTERVAL);
     health_timer.tick().await;
     let health_deadline = tokio::time::Instant::now() + HEALTH_TIMEOUT;
+    let mut health_probes: u32 = 0;
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -679,6 +912,15 @@ async fn spawn_and_serve(
             line = stdout_reader.next_line() => {
                 match line {
                     Ok(Some(l)) => {
+                        if preview_log_line_smells_fatal(&l) {
+                            tracing::warn!(
+                                %job_id,
+                                stream = "stdout",
+                                preview = %preview_label,
+                                line = %l,
+                                "preview: error-shaped stdout (early signal)"
+                            );
+                        }
                         if log_buf.len() < MAX_LOG_BYTES {
                             log_buf.push_str(&l);
                             log_buf.push('\n');
@@ -692,6 +934,15 @@ async fn spawn_and_serve(
             line = stderr_reader.next_line() => {
                 match line {
                     Ok(Some(l)) => {
+                        if preview_log_line_smells_fatal(&l) {
+                            tracing::warn!(
+                                %job_id,
+                                stream = "stderr",
+                                preview = %preview_label,
+                                line = %l,
+                                "preview: error-shaped stderr (early signal)"
+                            );
+                        }
                         if log_buf.len() < MAX_LOG_BYTES {
                             log_buf.push_str(&l);
                             log_buf.push('\n');
@@ -711,49 +962,125 @@ async fn spawn_and_serve(
             _ = health_timer.tick() => {
                 if tokio::time::Instant::now() > health_deadline {
                     if dirty { flush_logs(pool, job_id, &log_buf).await; }
+                    let tail = preview_log_tail_for_error(&log_buf);
+                    tracing::error!(
+                        %job_id,
+                        %port,
+                        %health_url,
+                        preview = %preview_label,
+                        log_tail = %tail,
+                        log_bytes = log_buf.len(),
+                        "preview: health check deadline exceeded — killing child"
+                    );
                     kill_dev_tree(&mut child).await;
                     return Err(format!(
-                        "child server did not become healthy within {}s",
+                        "child server did not become healthy within {}s (see log_tail in tracing event)",
                         HEALTH_TIMEOUT.as_secs()
                     ));
                 }
-                if let Ok(resp) = http.get(&health_url).send().await
-                    && resp.status().is_success()
-                {
-                    tracing::info!(%job_id, %port, "child server is healthy");
+                health_probes = health_probes.saturating_add(1);
+                // Long-running first boot: nudge UI + operators without spamming every probe.
+                if health_probes > 1 && health_probes % 20 == 0 {
+                    let waited_secs = health_probes.saturating_mul(HEALTH_POLL_INTERVAL.as_secs() as u32);
+                    tracing::info!(
+                        %job_id,
+                        %health_url,
+                        probe = health_probes,
+                        waited_secs,
+                        preview = %preview_label,
+                        "preview: still waiting for HTTP 200 on health URL"
+                    );
+                    publish_deploy_status(
+                        project_id,
+                        job_id,
+                        "waiting",
+                        &format!(
+                            "Still waiting for preview ({waited_secs}s) — install or dev server may be slow; see Logs tab."
+                        ),
+                    )
+                    .await;
+                }
+                match http.get(&health_url).send().await {
+                    Ok(resp) => {
+                        let st = resp.status();
+                        if st.is_success() {
+                            tracing::info!(
+                                %job_id,
+                                %port,
+                                %health_url,
+                                preview = %preview_label,
+                                "child server is healthy"
+                            );
 
-                    if dirty {
-                        flush_logs(pool, job_id, &log_buf).await;
-                    }
+                            publish_deploy_status(
+                                project_id,
+                                job_id,
+                                "healthy",
+                                "Preview server is live",
+                            )
+                            .await;
 
-                    let child_pid = child.id().map(|p| p as i32);
-                    let exit_pid = child_pid.unwrap_or(-1);
-                    let deployment_id = match create_deployment(pool, job_id, project_id, port, child_pid)
-                        .await
-                    {
-                        Ok(id) => id,
-                        Err(e) => {
-                            tracing::error!(%job_id, error = %e, "failed to create deployment");
-                            kill_dev_tree(&mut child).await;
-                            return Err(e);
+                            if dirty {
+                                flush_logs(pool, job_id, &log_buf).await;
+                            }
+
+                            let child_pid = child.id().map(|p| p as i32);
+                            let exit_pid = child_pid.unwrap_or(-1);
+                            let deployment_id = match create_deployment(
+                                pool,
+                                job_id,
+                                project_id,
+                                port,
+                                child_pid,
+                            )
+                            .await
+                            {
+                                Ok(id) => id,
+                                Err(e) => {
+                                    tracing::error!(%job_id, error = %e, "failed to create deployment");
+                                    kill_dev_tree(&mut child).await;
+                                    return Err(e);
+                                }
+                            };
+
+                            let bg_pool = pool.clone();
+                            tokio::spawn(async move {
+                                stream_until_exit(
+                                    &mut stdout_reader,
+                                    &mut stderr_reader,
+                                    &mut log_buf,
+                                    job_id,
+                                    deployment_id,
+                                    exit_pid,
+                                    &bg_pool,
+                                    child,
+                                )
+                                .await;
+                            });
+                            return Ok(());
+                        } else if health_probes == 1 || health_probes % 10 == 0 {
+                            tracing::warn!(
+                                %job_id,
+                                %health_url,
+                                http_status = %st,
+                                probe = health_probes,
+                                preview = %preview_label,
+                                "preview: health URL reachable but not 200 yet"
+                            );
                         }
-                    };
-
-                    let bg_pool = pool.clone();
-                    tokio::spawn(async move {
-                        stream_until_exit(
-                            &mut stdout_reader,
-                            &mut stderr_reader,
-                            &mut log_buf,
-                            job_id,
-                            deployment_id,
-                            exit_pid,
-                            &bg_pool,
-                            child,
-                        )
-                        .await;
-                    });
-                    return Ok(());
+                    }
+                    Err(e) => {
+                        if health_probes == 1 || health_probes % 20 == 0 {
+                            tracing::debug!(
+                                %job_id,
+                                %health_url,
+                                probe = health_probes,
+                                error = %e,
+                                preview = %preview_label,
+                                "preview: health probe failed (connection refused while starting is normal)"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -765,14 +1092,16 @@ async fn spawn_and_serve(
     }
 
     let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
-    let tail: String = log_buf
-        .chars()
-        .rev()
-        .take(500)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
+    let tail = preview_log_tail_for_error(&log_buf);
+    tracing::error!(
+        %job_id,
+        %port,
+        program,
+        preview = %preview_label,
+        exit = %status,
+        log_tail = %tail,
+        "preview child exited before becoming healthy"
+    );
     Err(format!("{program} exited with {status}: …{tail}"))
 }
 
@@ -906,8 +1235,9 @@ pub(super) async fn restart_deployment_after_opencode_build(
     }
 
     let row = sqlx::query(
-        "SELECT d.id, d.build_job_id, d.port, d.pid \
+        "SELECT d.id, d.build_job_id, d.port, d.pid, p.scope AS scope \
          FROM deployments d \
+         JOIN projects p ON p.id = d.project_id AND p.deleted_at IS NULL \
          WHERE d.project_id = $1 AND d.active = true AND d.deleted_at IS NULL \
            AND d.status = 'running' \
          ORDER BY d.created_at DESC LIMIT 1",
@@ -933,6 +1263,7 @@ pub(super) async fn restart_deployment_after_opencode_build(
     let port: i32 = row.get("port");
     let port: u16 = port.try_into().unwrap_or(28_000);
     let old_pid: Option<i32> = row.get("pid");
+    let scope_raw: String = row.get("scope");
 
     let work_dir = format!("/tmp/stem-cell-{spawn_job_id}");
     if !tokio::fs::try_exists(&work_dir).await.unwrap_or(false) {
@@ -953,6 +1284,13 @@ pub(super) async fn restart_deployment_after_opencode_build(
         wait_until_port_released(port, Duration::from_secs(25)).await;
     }
 
+    let scope_eff = effective_preview_scope(scope_raw.as_str());
+    let mise_chain = mise_preview_command_chain(scope_eff);
+    let health_path = match scope_eff {
+        "full" => "/healthz",
+        _ => "/",
+    };
+
     let script = format!(
         "set -e && export PORT={port} && cd {dir} && \
          if [ -f .env ]; then \
@@ -966,9 +1304,10 @@ pub(super) async fn restart_deployment_after_opencode_build(
            curl -fsSL https://mise.run | bash && MISE=~/.local/bin/mise; \
          fi && \
          $MISE trust && \
-         $MISE run dev",
+         {mise_chain}",
         dir = work_dir,
         port = port,
+        mise_chain = mise_chain,
     );
 
     let msg_id = spawn_message_id_for_project(pool, project_id).await;
@@ -992,6 +1331,8 @@ pub(super) async fn restart_deployment_after_opencode_build(
             spawn_job_id,
             port,
             &script,
+            health_path,
+            preview_commands_label(scope_eff),
         )
         .await
         {
@@ -1022,6 +1363,8 @@ async fn restart_dev_single_attempt(
     spawn_job_id: uuid::Uuid,
     port: u16,
     script: &str,
+    health_path: &str,
+    preview_label: &str,
 ) -> Result<(), String> {
     let mut cmd = tokio::process::Command::new("bash");
     cmd.args(["-c", script])
@@ -1034,7 +1377,15 @@ async fn restart_dev_single_attempt(
         .spawn()
         .map_err(|e| format!("spawn failed: {e}"))?;
 
-    tracing::info!(%deployment_id, %port, "deploy restart: dev process spawned");
+    let health_url = format!("http://127.0.0.1:{port}{health_path}");
+    tracing::info!(
+        %deployment_id,
+        %spawn_job_id,
+        %port,
+        %health_url,
+        preview = %preview_label,
+        "deploy restart: dev process spawned"
+    );
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -1046,10 +1397,10 @@ async fn restart_dev_single_attempt(
     let mut flush_timer = tokio::time::interval(LOG_FLUSH_INTERVAL);
     flush_timer.tick().await;
 
-    let health_url = format!("http://127.0.0.1:{port}/healthz");
     let mut health_timer = tokio::time::interval(HEALTH_POLL_INTERVAL);
     health_timer.tick().await;
     let health_deadline = tokio::time::Instant::now() + HEALTH_TIMEOUT;
+    let mut health_probes: u32 = 0;
 
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
@@ -1061,6 +1412,15 @@ async fn restart_dev_single_attempt(
             line = stdout_reader.next_line() => {
                 match line {
                     Ok(Some(l)) => {
+                        if preview_log_line_smells_fatal(&l) {
+                            tracing::warn!(
+                                %deployment_id,
+                                stream = "stdout",
+                                preview = %preview_label,
+                                line = %l,
+                                "deploy restart: error-shaped stdout"
+                            );
+                        }
                         if log_buf.len() < MAX_LOG_BYTES {
                             log_buf.push_str(&l);
                             log_buf.push('\n');
@@ -1074,6 +1434,15 @@ async fn restart_dev_single_attempt(
             line = stderr_reader.next_line() => {
                 match line {
                     Ok(Some(l)) => {
+                        if preview_log_line_smells_fatal(&l) {
+                            tracing::warn!(
+                                %deployment_id,
+                                stream = "stderr",
+                                preview = %preview_label,
+                                line = %l,
+                                "deploy restart: error-shaped stderr"
+                            );
+                        }
                         if log_buf.len() < MAX_LOG_BYTES {
                             log_buf.push_str(&l);
                             log_buf.push('\n');
@@ -1095,46 +1464,79 @@ async fn restart_dev_single_attempt(
                     if dirty {
                         flush_logs(pool, spawn_job_id, &log_buf).await;
                     }
+                    let tail = preview_log_tail_for_error(&log_buf);
+                    tracing::error!(
+                        %deployment_id,
+                        %health_url,
+                        preview = %preview_label,
+                        log_tail = %tail,
+                        "deploy restart: health check timed out"
+                    );
                     kill_dev_tree(&mut child).await;
                     return Err("health check timed out".into());
                 }
-                if let Ok(resp) = http.get(&health_url).send().await
-                    && resp.status().is_success()
-                {
-                    if dirty {
-                        flush_logs(pool, spawn_job_id, &log_buf).await;
-                    }
+                health_probes = health_probes.saturating_add(1);
+                match http.get(&health_url).send().await {
+                    Ok(resp) => {
+                        let st = resp.status();
+                        if st.is_success() {
+                            if dirty {
+                                flush_logs(pool, spawn_job_id, &log_buf).await;
+                            }
 
-                    let child_pid = child.id().map(|p| p as i32);
-                    let exit_pid = child_pid.unwrap_or(-1);
-                    if let Err(e) = sqlx::query(
-                        "UPDATE deployments SET pid = $2, status = 'running', active = true, \
-                         updated_at = NOW() WHERE id = $1",
-                    )
-                    .bind(deployment_id)
-                    .bind(child_pid)
-                    .execute(pool)
-                    .await
-                    {
-                        kill_dev_tree(&mut child).await;
-                        return Err(format!("record pid: {e}"));
-                    }
+                            let child_pid = child.id().map(|p| p as i32);
+                            let exit_pid = child_pid.unwrap_or(-1);
+                            if let Err(e) = sqlx::query(
+                                "UPDATE deployments SET pid = $2, status = 'running', active = true, \
+                                 updated_at = NOW() WHERE id = $1",
+                            )
+                            .bind(deployment_id)
+                            .bind(child_pid)
+                            .execute(pool)
+                            .await
+                            {
+                                kill_dev_tree(&mut child).await;
+                                return Err(format!("record pid: {e}"));
+                            }
 
-                    let bg_pool = pool.clone();
-                    tokio::spawn(async move {
-                        stream_until_exit(
-                            &mut stdout_reader,
-                            &mut stderr_reader,
-                            &mut log_buf,
-                            spawn_job_id,
-                            deployment_id,
-                            exit_pid,
-                            &bg_pool,
-                            child,
-                        )
-                        .await;
-                    });
-                    return Ok(());
+                            let bg_pool = pool.clone();
+                            tokio::spawn(async move {
+                                stream_until_exit(
+                                    &mut stdout_reader,
+                                    &mut stderr_reader,
+                                    &mut log_buf,
+                                    spawn_job_id,
+                                    deployment_id,
+                                    exit_pid,
+                                    &bg_pool,
+                                    child,
+                                )
+                                .await;
+                            });
+                            return Ok(());
+                        } else if health_probes == 1 || health_probes % 10 == 0 {
+                            tracing::warn!(
+                                %deployment_id,
+                                %health_url,
+                                http_status = %st,
+                                probe = health_probes,
+                                preview = %preview_label,
+                                "deploy restart: health not 200 yet"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if health_probes == 1 || health_probes % 20 == 0 {
+                            tracing::debug!(
+                                %deployment_id,
+                                %health_url,
+                                probe = health_probes,
+                                error = %e,
+                                preview = %preview_label,
+                                "deploy restart: health probe error"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1148,7 +1550,15 @@ async fn restart_dev_single_attempt(
         .wait()
         .await
         .map_err(|e| format!("wait: {e}"))?;
-    Err(format!("dev exited before healthy: {status}"))
+    let tail = preview_log_tail_for_error(&log_buf);
+    tracing::error!(
+        %deployment_id,
+        preview = %preview_label,
+        exit = %status,
+        log_tail = %tail,
+        "deploy restart: dev exited before healthy"
+    );
+    Err(format!("dev exited before healthy: {status}: …{tail}"))
 }
 
 /// `message_id` from the original spawn-environment build job (user message), for repair builds.
@@ -1192,6 +1602,7 @@ async fn insert_opencode_build_job_row(
     message_id: uuid::Uuid,
     prompt: &str,
     reuse_opencode_session_id: Option<&str>,
+    model: &str,
 ) -> Result<(), sqlx::Error> {
     let deployment_id = active_deployment_id_for_project(pool, project_id).await;
 
@@ -1200,7 +1611,7 @@ async fn insert_opencode_build_job_row(
              (id, status, prompt_summary, model, tokens_used, error_message, \
               duration_ms, logs, deployment_id, project_id, message_id, \
               opencode_session_id, created_at, updated_at) \
-             VALUES ($1, 'queued', $2, 'opencode', 0, '', 0, '', $3, $4, $5, $6, NOW(), NOW())",
+             VALUES ($1, 'queued', $2, $7, 0, '', 0, '', $3, $4, $5, $6, NOW(), NOW())",
     )
     .bind(oc_job_id)
     .bind(prompt)
@@ -1208,6 +1619,7 @@ async fn insert_opencode_build_job_row(
     .bind(project_id)
     .bind(message_id)
     .bind(reuse_opencode_session_id)
+    .bind(model)
     .execute(pool)
     .await?;
 
@@ -1233,14 +1645,35 @@ async fn run_one_opencode_build(
     project_id: uuid::Uuid,
     message_id: uuid::Uuid,
     prompt: &str,
+    model: &str,
 ) -> Result<crate::system_api::RunBuildOutput, String> {
+    if has_active_opencode_job(pool, project_id)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        if model == "opencode-repair" {
+            tracing::info!(
+                %project_id,
+                "skip OpenCode repair job — another opencode job already queued/running"
+            );
+            return Ok(crate::system_api::RunBuildOutput {
+                artifacts_count: 0,
+                tokens_used: 0,
+                status: "skipped".to_string(),
+            });
+        }
+        return Err(
+            "A build is already in progress for this project — wait for it to finish.".into(),
+        );
+    }
+
     let oc_job_id = uuid::Uuid::new_v4();
 
-    insert_opencode_build_job_row(pool, oc_job_id, project_id, message_id, prompt, None)
+    insert_opencode_build_job_row(pool, oc_job_id, project_id, message_id, prompt, None, model)
         .await
         .map_err(|e| e.to_string())?;
 
-    tracing::info!(%project_id, %oc_job_id, "OpenCode build job queued");
+    tracing::info!(%project_id, %oc_job_id, %model, "OpenCode build job queued");
 
     match invoke_run_build(pool, oc_job_id).await {
         Ok(output) => Ok(output),
@@ -1263,10 +1696,19 @@ async fn run_opencode_repair_pass(
     message_id: uuid::Uuid,
     round: u32,
 ) -> Result<(), String> {
+    let scope_raw = fetch_project_scope_raw(pool, project_id).await?;
+    let body = dev_server_repair_body(scope_raw.as_str());
     let prompt = format!(
-        "{DEV_SERVER_REPAIR_PROMPT}\n\n(Automated repair round {round} — `mise run dev` did not become healthy.)"
+        "{body}\n\n(Automated repair round {round} — preview server did not become healthy.)"
     );
-    run_one_opencode_build(pool, project_id, message_id, &prompt).await?;
+    run_one_opencode_build(
+        pool,
+        project_id,
+        message_id,
+        &prompt,
+        "opencode-repair",
+    )
+    .await?;
     Ok(())
 }
 
@@ -1278,7 +1720,15 @@ async fn trigger_opencode_build(
     message_id: uuid::Uuid,
     prompt: &str,
 ) {
-    match run_one_opencode_build(pool, project_id, message_id, prompt).await {
+    if let Ok(true) = has_active_opencode_job(pool, project_id).await {
+        tracing::info!(
+            %project_id,
+            "skip post-spawn OpenCode job — another opencode job already queued/running"
+        );
+        return;
+    }
+
+    match run_one_opencode_build(pool, project_id, message_id, prompt, "opencode").await {
         Ok(output) => {
             tracing::info!(
                 %project_id,

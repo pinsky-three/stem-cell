@@ -52,6 +52,7 @@ fn make_stream(
                         BuildEvent::ToolCall { .. } => "tool.call",
                         BuildEvent::BuildComplete { .. } => "build.complete",
                         BuildEvent::BuildError { .. } => "build.error",
+                        BuildEvent::DeployStatus { .. } => "deploy.status",
                     };
                     yield Ok(Event::default().event(event_type).data(data));
                 }

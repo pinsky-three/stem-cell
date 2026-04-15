@@ -286,11 +286,13 @@ function ChatPanel({
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-neutral-700 scrollbar-track-transparent">
-        {messages.length === 0 && thinkingSteps.length === 0 && !streamingText && (
-          <div className="flex h-full items-center justify-center text-sm text-neutral-600">
-            Describe what you want to build.
-          </div>
-        )}
+        {messages.length === 0 &&
+          thinkingSteps.length === 0 &&
+          !streamingText && (
+            <div className="flex h-full items-center justify-center text-sm text-neutral-600">
+              Describe what you want to build.
+            </div>
+          )}
         {messages.map((m) => (
           <div
             key={m.id}
@@ -491,9 +493,12 @@ function UrlBar({
 function PreviewPanel({
   deploymentId,
   status,
+  statusDetail,
 }: {
   deploymentId: string | null;
   status: string | null;
+  /** Latest deploy / setup message while the container or dev server is coming up */
+  statusDetail: string | null;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [currentUrl, setCurrentUrl] = useState("");
@@ -603,11 +608,16 @@ function PreviewPanel({
         : "Waiting for build";
 
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-3 text-neutral-600">
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-neutral-600">
       {status === "running" && (
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-neutral-700 border-t-indigo-500" />
       )}
       <p className="text-sm">{label}</p>
+      {status === "running" && statusDetail ? (
+        <p className="max-w-md text-xs leading-relaxed text-neutral-500">
+          {statusDetail}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -685,12 +695,21 @@ interface BuildErrorEvent {
   error: string;
 }
 
+interface DeployStatusEvent {
+  event: "deploy_status";
+  job_id: string;
+  project_id: string;
+  phase: string;
+  message: string;
+}
+
 type BuildEvent =
   | BuildStatusEvent
   | MessageChunkEvent
   | ToolCallEvent
   | BuildCompleteEvent
-  | BuildErrorEvent;
+  | BuildErrorEvent
+  | DeployStatusEvent;
 
 // ── Main component ──────────────────────────────────────────────────────
 
@@ -701,6 +720,9 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   const [isLoading, setIsLoading] = useState(false);
   const [streamingText, setStreamingText] = useState("");
   const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+  const [previewStatusDetail, setPreviewStatusDetail] = useState<string | null>(
+    null,
+  );
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
@@ -748,12 +770,11 @@ export default function ProjectView({ projectId }: { projectId: string }) {
       try {
         const data: BuildStatusEvent = JSON.parse(e.data);
         setJob((prev) =>
-          prev
-            ? { ...prev, id: data.job_id, status: data.status }
-            : prev,
+          prev ? { ...prev, id: data.job_id, status: data.status } : prev,
         );
         if (data.status === "running") {
           setIsLoading(true);
+          setPreviewStatusDetail(null);
           setTab("chat");
           setThinkingSteps((steps) =>
             steps.length === 0
@@ -769,7 +790,9 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           );
           startPolling(data.job_id);
         }
-      } catch { /* ignore parse errors */ }
+      } catch {
+        /* ignore parse errors */
+      }
     });
 
     es.addEventListener("message.chunk", (e) => {
@@ -781,7 +804,9 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         setJob((prev) =>
           prev ? { ...prev, logs: (prev.logs || "") + data.text } : prev,
         );
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     });
 
     es.addEventListener("tool.call", (e) => {
@@ -800,7 +825,9 @@ export default function ProjectView({ projectId }: { projectId: string }) {
             timestamp: Date.now(),
           },
         ]);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     });
 
     es.addEventListener("build.complete", (e) => {
@@ -822,6 +849,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         });
         streamingMsgIdRef.current = null;
         setThinkingSteps([]);
+        setPreviewStatusDetail(null);
 
         setJob((prev) =>
           prev
@@ -837,7 +865,9 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           scheduleBuildJobRefetches(data.job_id, setJob);
           stopPolling();
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     });
 
     es.addEventListener("build.error", (e) => {
@@ -852,7 +882,29 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         setStreamingText("");
         setThinkingSteps([]);
         streamingMsgIdRef.current = null;
-      } catch { /* ignore */ }
+        setPreviewStatusDetail(null);
+      } catch {
+        /* ignore */
+      }
+    });
+
+    es.addEventListener("deploy.status", (e) => {
+      try {
+        const data: DeployStatusEvent = JSON.parse(e.data);
+        setThinkingSteps((steps) => [
+          ...steps,
+          {
+            id: crypto.randomUUID(),
+            kind: "status" as const,
+            label: data.message,
+            timestamp: Date.now(),
+          },
+        ]);
+        setPreviewStatusDetail(data.message);
+        setIsLoading(true);
+      } catch {
+        /* ignore */
+      }
     });
 
     es.onerror = () => {
@@ -959,6 +1011,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     setIsLoading(true);
     setStreamingText("");
     setThinkingSteps([]);
+    setPreviewStatusDetail(null);
     setTab("chat");
 
     try {
@@ -1031,6 +1084,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           <PreviewPanel
             deploymentId={job?.deployment_id ?? null}
             status={job?.status ?? null}
+            statusDetail={previewStatusDetail}
           />
         </div>
       </div>

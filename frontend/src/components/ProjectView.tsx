@@ -47,6 +47,14 @@ interface BuildJob {
   project_id: string;
 }
 
+/** OpenCode jobs may omit deployment_id in older rows; keep preview when refetching. */
+function mergeBuildJob(prev: BuildJob | null, next: BuildJob): BuildJob {
+  return {
+    ...next,
+    deployment_id: next.deployment_id ?? prev?.deployment_id ?? null,
+  };
+}
+
 interface Message {
   id: string;
   role: string;
@@ -681,7 +689,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         const res = await fetch(`/api/build_jobs/${jobId}`);
         if (!res.ok) return;
         const data: BuildJob = await res.json();
-        setJob(data);
+        setJob((p) => mergeBuildJob(p, data));
         if (TERMINAL_STATUSES.has(data.status)) {
           stopPolling();
           setIsLoading(false);
@@ -791,7 +799,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         if (data.job_id) {
           fetch(`/api/build_jobs/${data.job_id}`)
             .then((r) => r.json())
-            .then((j: BuildJob) => setJob(j))
+            .then((j: BuildJob) => setJob((p) => mergeBuildJob(p, j)))
             .catch(() => {});
         }
       } catch { /* ignore */ }

@@ -947,6 +947,23 @@ async fn spawn_message_id_for_project(
     Some(row.get("message_id"))
 }
 
+/// Latest running deployment for this project (preview URL / checkout anchor).
+async fn active_deployment_id_for_project(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+) -> Option<uuid::Uuid> {
+    let row = sqlx::query(
+        "SELECT id FROM deployments \
+         WHERE project_id = $1 AND deleted_at IS NULL AND active = true AND status = 'running' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .ok()??;
+    Some(row.get("id"))
+}
+
 /// Queue one OpenCode build job and run it to completion (blocks).
 async fn run_one_opencode_build(
     pool: &sqlx::PgPool,
@@ -955,15 +972,17 @@ async fn run_one_opencode_build(
     prompt: &str,
 ) -> Result<crate::system_api::RunBuildOutput, String> {
     let oc_job_id = uuid::Uuid::new_v4();
+    let deployment_id = active_deployment_id_for_project(pool, project_id).await;
 
     sqlx::query(
         "INSERT INTO build_jobs \
              (id, status, prompt_summary, model, tokens_used, error_message, \
               duration_ms, logs, deployment_id, project_id, message_id, created_at, updated_at) \
-             VALUES ($1, 'queued', $2, 'opencode', 0, '', 0, '', NULL, $3, $4, NOW(), NOW())",
+             VALUES ($1, 'queued', $2, 'opencode', 0, '', 0, '', $3, $4, $5, NOW(), NOW())",
     )
     .bind(oc_job_id)
     .bind(prompt)
+    .bind(deployment_id)
     .bind(project_id)
     .bind(message_id)
     .execute(pool)

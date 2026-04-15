@@ -31,6 +31,12 @@ import Base from "../../../layouts/Base.astro";
               <input type="text" name="prompt" placeholder="prompt"
                 class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
             </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">project id</label>
+              <input type="text" name="project_id" placeholder="project_id (UUID)"
+                pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+            </div>
       </div>
       <button type="submit" id="submit-btn"
         class="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold transition hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed">
@@ -70,7 +76,8 @@ import Base from "../../../layouts/Base.astro";
       const body = {
           org_id: form.elements['org_id'].value,
           user_id: form.elements['user_id'].value,
-          prompt: form.elements['prompt'].value
+          prompt: form.elements['prompt'].value,
+          project_id: form.elements['project_id'].value || null
       };
 
       try {

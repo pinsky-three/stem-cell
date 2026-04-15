@@ -49,10 +49,37 @@ interface BuildJob {
 
 /** OpenCode jobs may omit deployment_id in older rows; keep preview when refetching. */
 function mergeBuildJob(prev: BuildJob | null, next: BuildJob): BuildJob {
+  const prevLogs = prev?.logs ?? "";
+  const nextLogs = next.logs ?? "";
+  // Avoid wiping streamed / longer client logs if a refetch races an empty/partial DB row.
+  const logs =
+    nextLogs.length >= prevLogs.length ? nextLogs : prevLogs || nextLogs;
+
   return {
     ...next,
     deployment_id: next.deployment_id ?? prev?.deployment_id ?? null,
+    logs,
   };
+}
+
+/** Several refetches catch races: logs/status updated on disk after build.complete SSE. */
+function scheduleBuildJobRefetches(
+  jobId: string,
+  setJobFn: React.Dispatch<React.SetStateAction<BuildJob | null>>,
+) {
+  const delaysMs = [0, 500, 1500, 3500];
+  for (const delay of delaysMs) {
+    window.setTimeout(async () => {
+      try {
+        const r = await fetch(`/api/build_jobs/${jobId}`);
+        if (!r.ok) return;
+        const j: BuildJob = await r.json();
+        setJobFn((p) => mergeBuildJob(p, j));
+      } catch {
+        /* ignore */
+      }
+    }, delay);
+  }
 }
 
 interface Message {
@@ -629,6 +656,8 @@ interface BuildStatusEvent {
   status: string;
 }
 
+const LATEST_JOB_POLL_MS = 4_000;
+
 interface MessageChunkEvent {
   event: "message_chunk";
   job_id: string;
@@ -719,17 +748,26 @@ export default function ProjectView({ projectId }: { projectId: string }) {
       try {
         const data: BuildStatusEvent = JSON.parse(e.data);
         setJob((prev) =>
-          prev ? { ...prev, status: data.status } : prev,
+          prev
+            ? { ...prev, id: data.job_id, status: data.status }
+            : prev,
         );
         if (data.status === "running") {
           setIsLoading(true);
           setTab("chat");
-          setThinkingSteps([{
-            id: crypto.randomUUID(),
-            kind: "status",
-            label: "Build started — setting up environment",
-            timestamp: Date.now(),
-          }]);
+          setThinkingSteps((steps) =>
+            steps.length === 0
+              ? [
+                  {
+                    id: crypto.randomUUID(),
+                    kind: "status",
+                    label: "Build started — setting up environment",
+                    timestamp: Date.now(),
+                  },
+                ]
+              : steps,
+          );
+          startPolling(data.job_id);
         }
       } catch { /* ignore parse errors */ }
     });
@@ -795,12 +833,9 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         );
         setIsLoading(false);
 
-        // Refresh full job data from API for deployment_id, etc.
         if (data.job_id) {
-          fetch(`/api/build_jobs/${data.job_id}`)
-            .then((r) => r.json())
-            .then((j: BuildJob) => setJob((p) => mergeBuildJob(p, j)))
-            .catch(() => {});
+          scheduleBuildJobRefetches(data.job_id, setJob);
+          stopPolling();
         }
       } catch { /* ignore */ }
     });
@@ -828,9 +863,30 @@ export default function ProjectView({ projectId }: { projectId: string }) {
       es.close();
       eventSourceRef.current = null;
     };
-  }, [projectId]);
+  }, [projectId, startPolling, stopPolling]);
 
   useEffect(() => stopPolling, [stopPolling]);
+
+  // SSE can lag or drop under burst; merge latest row periodically (skip ?job= deep-link).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("job")) return;
+
+    const t = window.setInterval(async () => {
+      try {
+        const r = await fetch(
+          `/api/build_jobs?sort=created_at&order=desc&limit=1&project_id=${projectId}`,
+        );
+        if (!r.ok) return;
+        const jobs: BuildJob[] = await r.json();
+        if (jobs.length === 0) return;
+        setJob((p) => mergeBuildJob(p, jobs[0]));
+      } catch {
+        /* ignore */
+      }
+    }, LATEST_JOB_POLL_MS);
+    return () => clearInterval(t);
+  }, [projectId]);
 
   // On mount: fetch the latest job for this project (fallback)
   useEffect(() => {
@@ -913,6 +969,8 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           org_id: DEFAULT_ORG_ID,
           user_id: DEFAULT_USER_ID,
           prompt: content,
+          // Reuse checkout, deployment, and OpenCode session — do not spawn a new project.
+          project_id: projectId,
         }),
       });
       if (!res.ok) throw new Error(await res.text());

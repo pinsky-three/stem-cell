@@ -22,9 +22,11 @@ async fn sse_handler(
     let bus = event_bus();
     let rx = {
         let mut writers = bus.write().await;
+        // Large buffer: message.chunk bursts can lag slow consumers; dropping events loses
+        // build.complete and leaves the UI stale until manual refresh.
         let tx = writers
             .entry(project_id)
-            .or_insert_with(|| broadcast::channel::<BuildEvent>(256).0);
+            .or_insert_with(|| broadcast::channel::<BuildEvent>(16_384).0);
         tx.subscribe()
     };
 

@@ -7,6 +7,7 @@ fn spawn_environment_input_roundtrips_json() {
         org_id: uuid::Uuid::new_v4(),
         user_id: uuid::Uuid::new_v4(),
         prompt: "test".to_string(),
+        project_id: Some(uuid::Uuid::new_v4()),
     };
     let json = serde_json::to_string(&input).unwrap();
     let decoded: SpawnEnvironmentInput = serde_json::from_str(&json).unwrap();

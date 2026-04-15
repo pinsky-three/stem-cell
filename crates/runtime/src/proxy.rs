@@ -70,6 +70,10 @@ async fn do_proxy(
     let method = req.method().clone();
     let mut headers = req.headers().clone();
     strip_hop_by_hop(&mut headers);
+    headers.insert(
+        axum::http::header::HOST,
+        format!("localhost:{port}").parse().unwrap(),
+    );
 
     let body_bytes = match axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024).await {
         Ok(b) => b,

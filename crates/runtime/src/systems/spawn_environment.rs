@@ -27,7 +27,9 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 const MAX_LOG_BYTES: usize = 512 * 1024;
 
 /// Bash snippet that patches `frontend/package.json` so:
-///   1. `astro dev` respects PORT (Astro ignores the PORT env var — needs `--port`).
+///   1. `astro dev` gets `--host 0.0.0.0 --port {port}` (Astro ignores the PORT env var;
+///      `--host 0.0.0.0` binds all interfaces so both 127.0.0.1 and ::1 reach the server,
+///      and also disables Vite's `allowedHosts` check that blocks proxied hostnames).
 ///   2. Vite is pinned to ^7 via npm `overrides` (Astro 6 is incompatible with Vite 8;
 ///      the template may pull Vite 8 transitively, causing `Missing field moduleType` 500s).
 /// Inserted into setup scripts after PORT patching, before `npm install` / `mise install`.
@@ -36,8 +38,8 @@ fn astro_port_patch_snippet(port: u16) -> String {
         "if [ -f frontend/package.json ]; then \
            if grep -q '\"astro dev\"' frontend/package.json && ! grep -q '\\-\\-port' frontend/package.json; then \
              _ast=$(mktemp) || exit 1; \
-             sed 's/\"astro dev\"/\"astro dev --port {port}\"/' frontend/package.json > \"$_ast\" && mv \"$_ast\" frontend/package.json && \
-             echo '[stem-cell] patched frontend/package.json: astro dev --port {port}'; \
+             sed 's/\"astro dev\"/\"astro dev --host 0.0.0.0 --port {port}\"/' frontend/package.json > \"$_ast\" && mv \"$_ast\" frontend/package.json && \
+             echo '[stem-cell] patched frontend/package.json: astro dev --host 0.0.0.0 --port {port}'; \
            fi && \
            if ! grep -q '\"overrides\"' frontend/package.json; then \
              _vite=$(mktemp) || exit 1; \
@@ -1069,8 +1071,6 @@ async fn spawn_and_serve(
         .map_err(|e| format!("failed to start {program}: {e}"))?;
 
     let pid = child.id().unwrap_or(0);
-    // Astro (and some other frameworks) bind to IPv6 ::1 only — 127.0.0.1 gets ECONNREFUSED.
-    // `localhost` resolves to both ::1 and 127.0.0.1 via the system resolver / happy eyeballs.
     let health_url = format!("http://localhost:{port}{health_path}");
     tracing::info!(
         %job_id,

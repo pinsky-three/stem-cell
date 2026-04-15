@@ -70,6 +70,8 @@ async fn do_proxy(
     let method = req.method().clone();
     let mut headers = req.headers().clone();
     strip_hop_by_hop(&mut headers);
+    // Vite's `allowedHosts` check validates the Host header; set it to localhost
+    // so proxied requests from external domains (e.g. Railway) aren't rejected.
     headers.insert(
         axum::http::header::HOST,
         format!("localhost:{port}").parse().unwrap(),

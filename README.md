@@ -31,7 +31,7 @@ Stem Cell models an **AI app-builder SaaS platform** (think Lovable/Bolt) with 1
 | Build Pipeline | BuildJob, Artifact |
 | Deployment | Deployment |
 
-Business workflows include project creation, message-driven AI build queuing, deployment via hosting providers, subscription upgrades, periodic deployment cleanup, and container-based dev environment spawning with a reverse proxy.
+Business workflows include project creation, message-driven AI build queuing (powered by [OpenCode](https://opencode.ai) with real-time SSE streaming), deployment via hosting providers, subscription upgrades, periodic deployment cleanup, and dev environment spawning (subprocess or container mode) with a reverse proxy.
 
 ## Architecture
 
@@ -44,17 +44,19 @@ stem-cell/
 │   ├── resource-model-macro/   # proc-macro: YAML → Rust codegen (publishable crate)
 │   ├── system-model-macro/     # proc-macro: systems YAML → traits, DTOs, executors
 │   ├── systems-codegen/        # CLI: materializes impl stubs + contract tests
+│   ├── opencode-client/        # OpenCode server client: process mgmt, SSE, sessions
 │   └── runtime/                # binary: Axum server + build.rs (frontend codegen)
 │       ├── build.rs            # reads specs → generates Astro pages → builds frontend
-│       ├── src/main.rs         # connect DB, migrate, serve API + proxy + static files
+│       ├── src/main.rs         # connect DB, migrate, serve API + proxy + SSE + static files
 │       ├── src/proxy.rs        # reverse proxy for child-environment subdomains
+│       ├── src/events.rs       # SSE endpoint: streams build/deploy events to the frontend
 │       └── src/systems/        # hand-implemented contract systems
 ├── frontend/                   # Astro 6 + Tailwind 4 (pages are @generated)
 │   └── src/components/
-│       ├── ProjectView.tsx     # SPA project editor with embedded preview
+│       ├── ProjectView.tsx     # SPA project editor with live preview + build event stream
 │       └── HeroPrompt.tsx      # AI prompt input on landing page
 ├── Dockerfile                  # multi-stage: rust:bookworm → debian:bookworm-slim
-└── .mise.toml                  # tool versions + task runner
+└── .mise.toml                  # tool versions + task runner (Rust, Node, OpenCode)
 ```
 
 ### How it works
@@ -62,8 +64,9 @@ stem-cell/
 1. `build.rs` reads `specs/self.yaml` and `specs/systems.yaml`, generates Astro pages into `frontend/src/pages/`
 2. `build.rs` runs `npm run build` to compile the frontend into `public/`
 3. The proc-macros read the same specs and expand into structs, repos, migrations, API routes, and system executors
-4. At startup, the server applies migrations, mounts the API under `/api/*`, serves OpenAPI docs at `/api/docs`, and serves the static frontend as a fallback
-5. Subdomain requests (e.g. `<slug>.localhost:4200`) are reverse-proxied to the corresponding child environment's port
+4. At startup, the server applies migrations, mounts the API under `/api/*`, serves OpenAPI docs at `/api/docs`, mounts the SSE endpoint at `/api/projects/{id}/events`, and serves the static frontend as a fallback
+5. When a build is triggered, the runtime spawns an OpenCode server per project, sends prompts via the OpenCode client, and streams build/deploy events (message chunks, tool calls, status updates) to the frontend over SSE
+6. Subdomain requests (e.g. `<slug>.localhost:4200`) are reverse-proxied to the corresponding child environment's port (HOST header is rewritten for Vite compatibility)
 
 ### Systems
 
@@ -71,11 +74,11 @@ stem-cell/
 |---|---|---|
 | CreateProject | declarative | Creates a project with its first conversation |
 | SendMessage | declarative | Posts a user message and queues an AI build job |
-| RunBuild | contract | Executes the AI code-generation pipeline |
+| RunBuild | contract | Runs the OpenCode AI pipeline, streams build events via SSE, and restarts deployments on completion |
 | DeployProject | declarative | Deploys a successful build to the hosting provider |
 | UpgradeSubscription | declarative | Changes an org's plan via the payment provider |
-| SpawnEnvironment | contract | Creates a project, queues a build, and spawns a dev container with reverse proxy |
-| CleanupDeployments | contract | Stops stale deployments, kills processes, and cleans up temp files (runs periodically) |
+| SpawnEnvironment | contract | Creates a project, queues a build, spawns a dev environment (subprocess or container), and registers it with the reverse proxy |
+| CleanupDeployments | contract | Stops stale deployments, kills process groups, releases ports, and cleans up temp files (runs periodically) |
 
 **Declarative** systems are fully generated from step definitions. **Contract** systems generate a trait + DTOs — you implement the body in `crates/runtime/src/systems/`.
 
@@ -83,14 +86,26 @@ stem-cell/
 
 | Provider | Operation | Purpose |
 |---|---|---|
-| ai_provider | generate_code | AI code generation from prompts |
+| ai_provider (OpenCode) | generate_code | AI code generation via OpenCode server (SSE-streamed) |
 | hosting_provider | deploy_app | Deploy built projects to subdomains |
 | payment_provider | create_subscription | Process plan upgrades |
 
+### OpenCode integration
+
+The `opencode-client` crate manages the lifecycle of [OpenCode](https://opencode.ai) server instances. For each build job, the runtime:
+
+1. Resolves the `opencode` binary (via `mise where` with PATH fallback)
+2. Spawns a dedicated OpenCode server with per-project working directory and port
+3. Sends prompts and streams SSE events (message chunks, tool calls, completion status) back through the event bus
+4. Reaps idle servers after a configurable timeout
+
+Configuration is auto-generated from whichever AI API key is set (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`). See **Environment variables** below for all knobs.
+
 ## Prerequisites
 
-- [mise](https://mise.jdx.dev/) (installs Rust 1.94+ and Node 22 automatically)
+- [mise](https://mise.jdx.dev/) (installs Rust 1.94+, Node 22, and OpenCode automatically)
 - PostgreSQL (or a Neon / Supabase connection string)
+- An AI API key (OpenRouter, Anthropic, or OpenAI) for code-generation builds
 
 ## Quick start
 
@@ -103,7 +118,7 @@ mise install
 
 # 3. Configure environment
 cp .env.example .env
-# Edit .env — set DATABASE_URL to your Postgres connection string
+# Edit .env — set DATABASE_URL and at least one AI API key (OPENROUTER_API_KEY, etc.)
 
 # 4. Install frontend deps
 mise run frontend:install
@@ -119,6 +134,7 @@ Then open:
 | `http://localhost:4200` | Landing page with AI prompt input |
 | `http://localhost:4200/admin` | Admin dashboard (entity CRUD + system triggers) |
 | `http://localhost:4200/api/docs` | Scalar API explorer |
+| `http://localhost:4200/api/projects/{id}/events` | SSE stream of build & deploy events |
 | `http://localhost:4200/project?id=<uuid>` | Project editor with live preview |
 | `http://<slug>.localhost:4200` | Reverse-proxied child environment |
 
@@ -142,22 +158,39 @@ Then open:
 | `SMTP_USERNAME` | no | — | SMTP credentials |
 | `SMTP_PASSWORD` | no | — | SMTP credentials |
 | `SMTP_FROM` | no | `noreply@example.com` | Sender address |
+| **OpenCode** | | | |
+| `OPENCODE_PORT_BASE` | no | `14000` | First port for per-project OpenCode servers |
+| `OPENCODE_IDLE_TIMEOUT_SECS` | no | `600` | Seconds before an idle OpenCode server is reaped |
+| `OPENCODE_SERVER_PASSWORD` | no | — | Shared secret for OpenCode server auth |
+| `OPENCODE_WORKDIR_BASE` | no | `/tmp/stem-cell-projects` | Root directory for project working copies |
+| `OPENROUTER_API_KEY` | no | — | OpenRouter API key (auto-generates OpenCode config) |
+| `ANTHROPIC_API_KEY` | no | — | Anthropic API key (alternative to OpenRouter) |
+| `OPENAI_API_KEY` | no | — | OpenAI API key (alternative to OpenRouter) |
+| `OPENCODE_MODEL` | no | `openrouter/deepseek/deepseek-v3.2` | Model identifier (provider-prefixed) |
+| `OPENCODE_CONFIG_CONTENT` | no | — | Override auto-generated OpenCode config with raw JSON |
+| **Spawn / preview** | | | |
+| `SPAWN_MODE` | no | `subprocess` | `subprocess` or `container` — how child envs are created |
+| `STEM_CELL_DEV_START_ATTEMPTS` | no | `3` | Retries for `mise run dev` with OpenCode repair between tries |
+| `STEM_CELL_RUN_BUILD_SSE_TIMEOUT_SECS` | no | `1800` | Max seconds to wait for an OpenCode SSE build stream |
+| `STEM_CELL_OPENCODE_SYSTEM_PROMPT` | no | — | Override the default OpenCode system prompt (whitespace-only disables it) |
 
 ## Tasks (mise)
 
 ```bash
-mise run codegen          # generate stubs + tests from systems.yaml
-mise run dev              # codegen → build frontend → start server
-mise run dev:full         # backend + Astro HMR dev server in parallel
-mise run build            # codegen → release build (frontend + server)
-mise run check            # codegen → type-check only (skips frontend)
-mise run lint             # codegen → clippy on entire workspace
-mise run test             # codegen → run all workspace tests
-mise run test:contracts   # run only contract tests
-mise run ci               # full pipeline: check → clippy → test
-mise run frontend:dev     # Astro dev server with HMR
-mise run frontend:install # npm install
-mise run docker           # docker build -t stem-cell .
+mise run codegen            # generate stubs + tests from systems.yaml
+mise run dev                # codegen → build frontend → start server
+mise run dev:full           # backend + Astro HMR dev server in parallel
+mise run build              # codegen → release build (frontend + server)
+mise run check              # codegen → type-check only (skips frontend)
+mise run lint               # codegen → clippy on entire workspace
+mise run test               # codegen → run all workspace tests
+mise run test:contracts     # run only contract tests
+mise run ci                 # full pipeline: check → clippy → test
+mise run frontend:dev       # Astro dev server with HMR
+mise run frontend:install   # npm install
+mise run docker             # docker build -t stem-cell .
+mise run opencode:serve     # start an OpenCode server on port 14000 (dev/debug)
+mise run opencode:health    # check if an OpenCode server is responding
 ```
 
 ## Docker
@@ -244,12 +277,14 @@ For complex logic, use `mode: "contract"` — this generates a trait + DTOs that
 | `crates/resource-model-macro/` | Proc-macro crate (YAML → Rust codegen). Independently publishable. |
 | `crates/system-model-macro/` | Proc-macro crate (systems YAML → traits, DTOs, executors). |
 | `crates/systems-codegen/` | CLI that materializes impl stubs and contract tests from specs. |
-| `crates/runtime/` | The `stem-cell` binary. `build.rs` generates frontend pages; `main.rs` wires the server + proxy. |
+| `crates/opencode-client/` | OpenCode server client: binary resolution, process lifecycle, SSE stream parsing, session API. |
+| `crates/runtime/` | The `stem-cell` binary. `build.rs` generates frontend pages; `main.rs` wires the server + proxy + SSE. |
 | `crates/runtime/src/systems/` | Hand-implemented contract systems (RunBuild, SpawnEnvironment, CleanupDeployments). |
 | `crates/runtime/src/proxy.rs` | Reverse proxy: routes subdomain requests to child environment ports. |
+| `crates/runtime/src/events.rs` | SSE endpoint (`/api/projects/{id}/events`): streams build and deploy events to the frontend. |
 | `frontend/` | Astro 6 + Tailwind 4. Pages under `src/pages/admin/` are `@generated` — don't edit them. |
 | `frontend/src/pages/index.astro` | Landing page (hand-authored). |
-| `frontend/src/components/` | React components (ProjectView, HeroPrompt) for interactive UI. |
+| `frontend/src/components/` | React components (ProjectView with SSE build streaming, HeroPrompt) for interactive UI. |
 | `public/` | Build output from Astro (gitignored). Served as static files. |
 
 ## License

@@ -65,7 +65,7 @@ async fn do_proxy(
         return (StatusCode::GONE, "deployment is stopped").into_response();
     }
 
-    let target = format!("http://127.0.0.1:{port}/{path}");
+    let target = format!("http://localhost:{port}/{path}");
 
     let method = req.method().clone();
     let mut headers = req.headers().clone();

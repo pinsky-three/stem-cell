@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 const DEFAULT_REPO_URL: &str = "https://github.com/pinsky-three/stem-cell-shrank";
 const CONTAINER_MEMORY_LIMIT: &str = "2g";
+const CONTAINER_BASE_IMAGE: &str = "docker.io/library/debian:bookworm-slim";
 
 /// Max time allowed for the synchronous handler work (DB inserts).
 const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -24,6 +25,31 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Max log size stored per job (prevents unbounded growth).
 const MAX_LOG_BYTES: usize = 512 * 1024;
+
+/// Bash snippet that patches `frontend/package.json` so:
+///   1. `astro dev` respects PORT (Astro ignores the PORT env var — needs `--port`).
+///   2. Vite is pinned to ^7 via npm `overrides` (Astro 6 is incompatible with Vite 8;
+///      the template may pull Vite 8 transitively, causing `Missing field moduleType` 500s).
+/// Inserted into setup scripts after PORT patching, before `npm install` / `mise install`.
+fn astro_port_patch_snippet(port: u16) -> String {
+    format!(
+        "if [ -f frontend/package.json ]; then \
+           if grep -q '\"astro dev\"' frontend/package.json && ! grep -q '\\-\\-port' frontend/package.json; then \
+             _ast=$(mktemp) || exit 1; \
+             sed 's/\"astro dev\"/\"astro dev --port {port}\"/' frontend/package.json > \"$_ast\" && mv \"$_ast\" frontend/package.json && \
+             echo '[stem-cell] patched frontend/package.json: astro dev --port {port}'; \
+           fi && \
+           if ! grep -q '\"overrides\"' frontend/package.json; then \
+             _vite=$(mktemp) || exit 1; \
+             sed '$ d' frontend/package.json > \"$_vite\" && \
+             printf '  ,\"overrides\": {{\"vite\": \"^7\"}}\\n}}\\n' >> \"$_vite\" && \
+             mv \"$_vite\" frontend/package.json && \
+             echo '[stem-cell] added vite ^7 override to frontend/package.json'; \
+           fi; \
+         fi",
+        port = port,
+    )
+}
 
 /// Characters of combined stdout/stderr tail included in “exited before healthy” errors + `tracing::error`.
 const PREVIEW_EXIT_LOG_TAIL_CHARS: usize = 4096;
@@ -187,7 +213,7 @@ async fn wait_until_port_released(port: u16, timeout: Duration) {
             tracing::warn!(%port, "timeout waiting for port to release — proceeding anyway");
             return;
         }
-        match tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await {
+        match tokio::net::TcpStream::connect(("localhost", port)).await {
             Ok(_stream) => {
                 // Server still up; drop client and poll again.
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -588,6 +614,7 @@ async fn run_subprocess_setup(
 ) -> Result<(), String> {
     // `.mise.toml` often has `[env] _.file = ".env"` then `PORT = "…"`. If `.env` also sets PORT=4200,
     // mise can expose 4200 to tasks and the preview collides with the host stem-cell (EADDRINUSE).
+    let astro_patch = astro_port_patch_snippet(port);
     let script = format!(
         "set -e && \
          if [ -d \"{dir}/.git\" ]; then echo 'repo already cloned'; else git clone {repo} \"{dir}\"; fi && \
@@ -604,10 +631,12 @@ async fn run_subprocess_setup(
            printf 'PORT=%s\\n' '{port}' >> \"$_sc_env\" && \
            mv \"$_sc_env\" .env; \
          fi && \
+         {astro_patch} && \
          if command -v flock >/dev/null 2>&1; then flock /tmp/mise-install.lock $MISE install --yes; else $MISE install --yes; fi",
         repo = repo_url,
         dir = work_dir,
         port = port,
+        astro_patch = astro_patch,
     );
 
     tracing::info!(%job_id, %repo_url, "subprocess: clone and toolchain install");
@@ -679,6 +708,7 @@ async fn run_subprocess(
             pool,
             health_path,
             preview_commands_label(scope_eff),
+            None,
         )
         .await
         {
@@ -705,6 +735,71 @@ async fn run_subprocess(
     }
 
     Err(last_err)
+}
+
+/// `docker run` does not stream **image pull** through the container attach; pull first so job logs
+/// show layer progress instead of minutes of silence before `bash -c` starts.
+async fn pull_container_base_image_logged(
+    runtime: &str,
+    job_id: uuid::Uuid,
+    pool: &sqlx::PgPool,
+) -> Result<String, String> {
+    tracing::info!(
+        %job_id,
+        image = CONTAINER_BASE_IMAGE,
+        %runtime,
+        "pulling container base image (progress streams into build job logs)"
+    );
+
+    let mut cmd = tokio::process::Command::new(runtime);
+    cmd.arg("pull")
+        .arg(CONTAINER_BASE_IMAGE)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("{runtime} pull spawn: {e}"))?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{runtime} pull: no stderr pipe"))?;
+
+    let mut reader = PreviewLogLines::new(stderr);
+    let mut log_buf = String::from("--- docker pull (base image) ---\n");
+    flush_logs(pool, job_id, &log_buf).await;
+
+    loop {
+        match reader.next_segment().await {
+            Ok(Some(l)) if !l.is_empty() => {
+                if log_buf.len() < MAX_LOG_BYTES {
+                    log_buf.push_str("[docker pull] ");
+                    log_buf.push_str(&l);
+                    log_buf.push('\n');
+                    flush_logs(pool, job_id, &log_buf).await;
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => break,
+            Err(e) => return Err(format!("{runtime} pull log read: {e}")),
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("{runtime} pull wait: {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "{runtime} pull failed ({status}) — fix network/registry access or pre-pull {CONTAINER_BASE_IMAGE}"
+        ));
+    }
+
+    log_buf.push_str("--- pull complete; starting container ---\n");
+    flush_logs(pool, job_id, &log_buf).await;
+    tracing::info!(%job_id, image = CONTAINER_BASE_IMAGE, "container base image pull finished");
+    Ok(log_buf)
 }
 
 /// Container mode: runs the build inside an isolated container.
@@ -736,10 +831,21 @@ async fn run_in_container(
         _ => "/",
     };
 
+    // Explicit `echo` + `git --progress`: Docker/apt often buffer pipe output for long stretches;
+    // newline-terminated milestones always reach the host log stream.
+    let astro_patch = astro_port_patch_snippet(port);
     let script = format!(
-        "apt-get update && apt-get install -y --no-install-recommends \
+        "set -e && export DEBIAN_FRONTEND=noninteractive && \
+         echo '[stem-cell] container bootstrap (port {port})' && \
+         echo '[stem-cell] apt-get update…' && \
+         apt-get update && \
+         echo '[stem-cell] installing OS packages (git, curl, build tools)…' && \
+         apt-get install -y --no-install-recommends \
              git curl ca-certificates build-essential pkg-config libssl-dev && \
-         git clone {repo} /work && cd /work && \
+         echo '[stem-cell] cloning {repo} → /work …' && \
+         GIT_TERMINAL_PROMPT=0 git clone --progress {repo} /work && \
+         echo '[stem-cell] clone done; configuring port and toolchain…' && \
+         cd /work && \
          curl -fsSL https://mise.run | bash && \
          ~/.local/bin/mise trust && \
          sed 's/^PORT = .*/PORT = \"{port}\"/' .mise.toml > .mise.toml.tmp && mv .mise.toml.tmp .mise.toml && \
@@ -749,12 +855,16 @@ async fn run_in_container(
            printf 'PORT=%s\\n' '{port}' >> \"$_sc_env\" && \
            mv \"$_sc_env\" .env; \
          fi && \
+         {astro_patch} && \
+         echo '[stem-cell] mise install (may take a few minutes)…' && \
          export PORT={port} && \
          ~/.local/bin/mise install --yes && \
+         echo '[stem-cell] starting preview tasks…' && \
          {container_chain}",
         repo = repo_url,
         port = port,
         container_chain = container_chain,
+        astro_patch = astro_patch,
     );
 
     tracing::info!(
@@ -776,14 +886,19 @@ async fn run_in_container(
     )
     .await;
 
+    let pull_log = pull_container_base_image_logged(runtime, job_id, pool).await?;
+
     spawn_and_serve(
         runtime,
         &[
             "run",
             "--rm",
+            // PTY tends to use line-oriented writes from apt/git; without it Docker may buffer
+            // attach output for a long time when the parent reads from a pipe.
+            "-t",
             &format!("--memory={CONTAINER_MEMORY_LIMIT}"),
             "--network=host",
-            "docker.io/library/debian:bookworm-slim",
+            CONTAINER_BASE_IMAGE,
             "bash",
             "-c",
             &script,
@@ -794,6 +909,7 @@ async fn run_in_container(
         pool,
         health_path,
         preview_commands_label(scope_eff),
+        Some(pull_log),
     )
     .await
 }
@@ -834,6 +950,82 @@ async fn flush_logs(pool: &sqlx::PgPool, job_id: uuid::Uuid, logs: &str) {
     }
 }
 
+/// Piped `docker run` / `apt-get` / `npm` often emit **`\r`-only** progress lines. `BufReader::lines()`
+/// waits for `\n`, so we would buffer forever and `log_bytes` stayed 0 until timeout.
+struct PreviewLogLines<R: tokio::io::AsyncRead + Unpin> {
+    inner: BufReader<R>,
+    pending: Vec<u8>,
+    skip_lf_after_cr: bool,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> PreviewLogLines<R> {
+    fn new(read: R) -> Self {
+        Self {
+            inner: BufReader::new(read),
+            pending: Vec::new(),
+            skip_lf_after_cr: false,
+        }
+    }
+
+    async fn next_segment(&mut self) -> std::io::Result<Option<String>> {
+        if self.skip_lf_after_cr {
+            self.skip_lf_after_cr = false;
+            let buf = self.inner.fill_buf().await?;
+            if !buf.is_empty() && buf[0] == b'\n' {
+                self.inner.consume(1);
+            }
+        }
+
+        loop {
+            let buf = self.inner.fill_buf().await?;
+            if buf.is_empty() {
+                if self.pending.is_empty() {
+                    return Ok(None);
+                }
+                let out = String::from_utf8_lossy(&self.pending).into_owned();
+                self.pending.clear();
+                return Ok(Some(out));
+            }
+
+            if let Some(i) = buf.iter().position(|&b| b == b'\n' || b == b'\r') {
+                let delim = buf[i];
+                self.pending.extend_from_slice(&buf[..i]);
+                let out = String::from_utf8_lossy(&self.pending).into_owned();
+                self.pending.clear();
+                let buf_len = buf.len();
+
+                if delim == b'\n' {
+                    self.inner.consume(i + 1);
+                    return Ok(Some(out));
+                }
+
+                // `\r` — same line refresh (apt) or `\r\n` line ending
+                let after = i + 1;
+                let has_crlf = after < buf_len && buf[after] == b'\n';
+                if has_crlf {
+                    self.inner.consume(after + 1);
+                } else {
+                    self.inner.consume(after);
+                    if after == buf_len {
+                        self.skip_lf_after_cr = true;
+                    }
+                }
+                return Ok(Some(out));
+            }
+
+            self.pending.extend_from_slice(buf);
+            let n = buf.len();
+            self.inner.consume(n);
+            // Rare: no `\n`/`\r` for a huge prefix — cap so we do not grow without bound.
+            if self.pending.len() > MAX_LOG_BYTES {
+                let keep = MAX_LOG_BYTES / 2;
+                let drain = self.pending.len().saturating_sub(keep);
+                self.pending.drain(..drain);
+            }
+        }
+    }
+}
+
 // ── Spawn, stream logs, wait for healthy, create deployment ────────────
 
 /// Spawns a long-running child process (the dev server), streams its logs,
@@ -849,6 +1041,8 @@ async fn spawn_and_serve(
     pool: &sqlx::PgPool,
     health_path: &str,
     preview_label: &str,
+    // Prepended to streamed logs (e.g. `docker pull` output for container mode).
+    initial_logs: Option<String>,
 ) -> Result<(), String> {
     let cmd_hint: String = args
         .windows(2)
@@ -875,7 +1069,9 @@ async fn spawn_and_serve(
         .map_err(|e| format!("failed to start {program}: {e}"))?;
 
     let pid = child.id().unwrap_or(0);
-    let health_url = format!("http://127.0.0.1:{port}{health_path}");
+    // Astro (and some other frameworks) bind to IPv6 ::1 only — 127.0.0.1 gets ECONNREFUSED.
+    // `localhost` resolves to both ::1 and 127.0.0.1 via the system resolver / happy eyeballs.
+    let health_url = format!("http://localhost:{port}{health_path}");
     tracing::info!(
         %job_id,
         %pid,
@@ -889,11 +1085,18 @@ async fn spawn_and_serve(
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let mut stderr_reader = BufReader::new(stderr).lines();
+    let mut stdout_reader = PreviewLogLines::new(stdout);
+    let mut stderr_reader = PreviewLogLines::new(stderr);
 
-    let mut log_buf = String::new();
-    let mut dirty = false;
+    let mut log_buf = initial_logs.unwrap_or_default();
+    if !log_buf.is_empty() && !log_buf.ends_with('\n') {
+        log_buf.push('\n');
+    }
+    let mut dirty = !log_buf.is_empty();
+    if dirty {
+        flush_logs(pool, job_id, &log_buf).await;
+        dirty = false;
+    }
     let mut flush_timer = tokio::time::interval(LOG_FLUSH_INTERVAL);
     flush_timer.tick().await;
 
@@ -909,9 +1112,9 @@ async fn spawn_and_serve(
 
     loop {
         tokio::select! {
-            line = stdout_reader.next_line() => {
-                match line {
-                    Ok(Some(l)) => {
+            seg = stdout_reader.next_segment() => {
+                match seg {
+                    Ok(Some(l)) if !l.is_empty() => {
                         if preview_log_line_smells_fatal(&l) {
                             tracing::warn!(
                                 %job_id,
@@ -927,13 +1130,14 @@ async fn spawn_and_serve(
                             dirty = true;
                         }
                     }
+                    Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(_) => break,
                 }
             }
-            line = stderr_reader.next_line() => {
-                match line {
-                    Ok(Some(l)) => {
+            seg = stderr_reader.next_segment() => {
+                match seg {
+                    Ok(Some(l)) if !l.is_empty() => {
                         if preview_log_line_smells_fatal(&l) {
                             tracing::warn!(
                                 %job_id,
@@ -949,6 +1153,7 @@ async fn spawn_and_serve(
                             dirty = true;
                         }
                     }
+                    Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(_) => break,
                 }
@@ -1108,8 +1313,8 @@ async fn spawn_and_serve(
 /// Continue streaming logs after the child is marked healthy.
 /// When the process exits, mark the deployment as stopped.
 async fn stream_until_exit(
-    stdout_reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
-    stderr_reader: &mut tokio::io::Lines<BufReader<tokio::process::ChildStderr>>,
+    stdout_reader: &mut PreviewLogLines<tokio::process::ChildStdout>,
+    stderr_reader: &mut PreviewLogLines<tokio::process::ChildStderr>,
     log_buf: &mut String,
     job_id: uuid::Uuid,
     deployment_id: uuid::Uuid,
@@ -1123,28 +1328,32 @@ async fn stream_until_exit(
 
     loop {
         tokio::select! {
-            line = stdout_reader.next_line() => {
-                match line {
-                    Ok(Some(l)) => {
+            seg = stdout_reader.next_segment() => {
+                match seg {
+                    Ok(Some(l)) if !l.is_empty() => {
                         if log_buf.len() < MAX_LOG_BYTES {
                             log_buf.push_str(&l);
                             log_buf.push('\n');
                             dirty = true;
                         }
                     }
-                    _ => break,
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
-            line = stderr_reader.next_line() => {
-                match line {
-                    Ok(Some(l)) => {
+            seg = stderr_reader.next_segment() => {
+                match seg {
+                    Ok(Some(l)) if !l.is_empty() => {
                         if log_buf.len() < MAX_LOG_BYTES {
                             log_buf.push_str(&l);
                             log_buf.push('\n');
                             dirty = true;
                         }
                     }
-                    _ => break,
+                    Ok(Some(_)) => {}
+                    Ok(None) => break,
+                    Err(_) => break,
                 }
             }
             _ = flush_timer.tick() => {
@@ -1377,7 +1586,7 @@ async fn restart_dev_single_attempt(
         .spawn()
         .map_err(|e| format!("spawn failed: {e}"))?;
 
-    let health_url = format!("http://127.0.0.1:{port}{health_path}");
+    let health_url = format!("http://localhost:{port}{health_path}");
     tracing::info!(
         %deployment_id,
         %spawn_job_id,
@@ -1389,8 +1598,8 @@ async fn restart_dev_single_attempt(
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let mut stderr_reader = BufReader::new(stderr).lines();
+    let mut stdout_reader = PreviewLogLines::new(stdout);
+    let mut stderr_reader = PreviewLogLines::new(stderr);
 
     let mut log_buf = String::new();
     let mut dirty = false;
@@ -1409,9 +1618,9 @@ async fn restart_dev_single_attempt(
 
     loop {
         tokio::select! {
-            line = stdout_reader.next_line() => {
-                match line {
-                    Ok(Some(l)) => {
+            seg = stdout_reader.next_segment() => {
+                match seg {
+                    Ok(Some(l)) if !l.is_empty() => {
                         if preview_log_line_smells_fatal(&l) {
                             tracing::warn!(
                                 %deployment_id,
@@ -1427,13 +1636,14 @@ async fn restart_dev_single_attempt(
                             dirty = true;
                         }
                     }
+                    Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(_) => break,
                 }
             }
-            line = stderr_reader.next_line() => {
-                match line {
-                    Ok(Some(l)) => {
+            seg = stderr_reader.next_segment() => {
+                match seg {
+                    Ok(Some(l)) if !l.is_empty() => {
                         if preview_log_line_smells_fatal(&l) {
                             tracing::warn!(
                                 %deployment_id,
@@ -1449,6 +1659,7 @@ async fn restart_dev_single_attempt(
                             dirty = true;
                         }
                     }
+                    Ok(Some(_)) => {}
                     Ok(None) => break,
                     Err(_) => break,
                 }

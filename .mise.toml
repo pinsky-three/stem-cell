@@ -98,6 +98,7 @@ run = "npm install"
 
 [tasks."frontend:dev"]
 description = "Astro dev server with hot reload"
+depends = ["frontend:install"]
 dir = "frontend"
 run = "npm run dev"
 

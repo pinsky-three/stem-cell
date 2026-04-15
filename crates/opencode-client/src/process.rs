@@ -88,28 +88,37 @@ fn build_inline_config(pm_config: &ProcessManagerConfig) -> Option<String> {
 /// Resolved path to the `opencode` binary (cached at first spawn).
 static OPENCODE_BIN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-/// Resolves the opencode binary. Tries `mise where opencode` first,
-/// then falls back to bare `opencode` on PATH.
+/// Resolves the opencode binary.
+/// 1. `mise where opencode` (tries PATH then `~/.local/bin/mise`).
+/// 2. Falls back to bare `opencode` on PATH.
 fn resolve_opencode_bin() -> &'static str {
     OPENCODE_BIN.get_or_init(|| {
-        if let Ok(output) = std::process::Command::new("mise")
-            .args(["where", "opencode"])
-            .output()
-        {
-            if output.status.success() {
-                let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let bin = format!("{dir}/opencode");
-                if std::path::Path::new(&bin).exists() {
-                    tracing::info!(path = %bin, "resolved opencode binary via mise");
-                    return bin;
-                }
-                let bin_in_bin = format!("{dir}/bin/opencode");
-                if std::path::Path::new(&bin_in_bin).exists() {
-                    tracing::info!(path = %bin_in_bin, "resolved opencode binary via mise");
-                    return bin_in_bin;
+        let mise_candidates: Vec<std::path::PathBuf> = {
+            let mut v: Vec<std::path::PathBuf> = vec!["mise".into()];
+            if let Some(home) = std::env::var_os("HOME") {
+                v.push(std::path::PathBuf::from(home).join(".local/bin/mise"));
+            }
+            v
+        };
+
+        for mise_bin in &mise_candidates {
+            if let Ok(output) = std::process::Command::new(mise_bin)
+                .args(["where", "opencode"])
+                .output()
+            {
+                if output.status.success() {
+                    let dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    for suffix in ["opencode", "bin/opencode"] {
+                        let bin = format!("{dir}/{suffix}");
+                        if std::path::Path::new(&bin).exists() {
+                            tracing::info!(path = %bin, mise = %mise_bin.display(), "resolved opencode binary via mise");
+                            return bin;
+                        }
+                    }
                 }
             }
         }
+
         tracing::warn!("could not resolve opencode via mise, falling back to PATH");
         "opencode".to_string()
     })

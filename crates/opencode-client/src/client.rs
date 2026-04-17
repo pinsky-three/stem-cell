@@ -179,6 +179,28 @@ impl OpenCodeClient {
         }
     }
 
+    /// Aborts any in-flight message/tool on the session. Required before
+    /// reusing a session whose previous turn left a pending tool call
+    /// (e.g. OpenCode's `question` tool waiting for a user reply) — without
+    /// the abort, the agent loop stays blocked and new prompts are never
+    /// processed. Returns Ok(()) whether the session was busy or idle.
+    pub async fn session_abort(&self, session_id: &str) -> Result<()> {
+        let req = self
+            .http
+            .post(self.url(&format!("/session/{session_id}/abort")))
+            .header(CONTENT_TYPE, "application/json");
+        let resp = self.apply_auth(req).send().await?;
+        let status = resp.status();
+        if status.is_success() || status.as_u16() == 404 {
+            Ok(())
+        } else {
+            Err(Error::ApiError {
+                status,
+                body: resp.text().await.unwrap_or_default(),
+            })
+        }
+    }
+
     // ── Diffs ─────────────────────────────────────────────────
 
     pub async fn session_diff(&self, session_id: &str) -> Result<Vec<FileDiff>> {

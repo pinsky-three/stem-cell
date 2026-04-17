@@ -88,6 +88,55 @@ fn opencode_build_system_prompt(project_scope_raw: &str) -> Option<String> {
     }
 }
 
+/// Result returned by the SSE forwarder task to the main run_build flow.
+/// Keeps a rich signal so the outer code can decide success vs. failure.
+struct ForwarderOutcome {
+    /// Accumulated assistant text/log. `None` means the forwarder never
+    /// observed session completion (timeout or early drop).
+    log_buf: Option<String>,
+    /// Populated when OpenCode emitted a `session.error` event. Carries a
+    /// short human-readable message describing the upstream model/provider
+    /// failure (e.g. "provider_unavailable: Network connection lost"). When
+    /// set, the build MUST NOT be marked succeeded — OpenCode idles right
+    /// after these errors, which would otherwise look like a clean exit.
+    provider_error: Option<String>,
+}
+
+/// Best-effort extractor for the human-readable bit of an OpenCode
+/// `session.error` payload. The real error text is double-JSON-encoded
+/// (the upstream provider's JSON is embedded as a string inside OpenCode's
+/// own envelope), so we try several nested shapes before giving up.
+fn summarize_session_error(data: &serde_json::Value) -> String {
+    let err_obj = data.get("error").unwrap_or(data);
+    let name = err_obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UnknownError");
+    let raw_message = err_obj
+        .get("data")
+        .and_then(|d| d.get("message"))
+        .and_then(|m| m.as_str());
+    if let Some(msg) = raw_message {
+        // The inner `message` field is frequently another JSON document.
+        if let Ok(inner) = serde_json::from_str::<serde_json::Value>(msg) {
+            let code = inner.get("code").and_then(|v| v.as_i64());
+            let inner_msg = inner.get("message").and_then(|v| v.as_str()).unwrap_or(msg);
+            let error_type = inner
+                .get("metadata")
+                .and_then(|m| m.get("error_type"))
+                .and_then(|v| v.as_str());
+            return match (code, error_type) {
+                (Some(c), Some(t)) => format!("{name}: {t} ({c}) — {inner_msg}"),
+                (Some(c), None) => format!("{name}: {c} — {inner_msg}"),
+                (None, Some(t)) => format!("{name}: {t} — {inner_msg}"),
+                (None, None) => format!("{name}: {inner_msg}"),
+            };
+        }
+        return format!("{name}: {msg}");
+    }
+    format!("{name}: {data}")
+}
+
 #[async_trait::async_trait]
 impl RunBuildSystem for super::AppSystems {
     async fn execute(
@@ -174,10 +223,30 @@ impl RunBuildSystem for super::AppSystems {
 
         // ── Create or reuse session ───────────────────────────
         let session = match existing_session {
-            Some(ref sid) => client
-                .get_session(sid)
-                .await
-                .map_err(|e| RunBuildError::AiProviderError(e.to_string()))?,
+            Some(ref sid) => {
+                // If the previous turn short-circuited on a `question`-type
+                // tool, that tool is still `pending` on OpenCode's side and
+                // the agent loop is blocked. New prompts to the session sit
+                // silently behind it (zero tool calls, zero streamed text,
+                // just heartbeats forever). Abort first; it's a no-op for
+                // idle sessions and clears the blocked tool when needed.
+                if let Err(e) = client.session_abort(sid).await {
+                    tracing::warn!(
+                        session_id = %sid,
+                        error = %e,
+                        "session_abort failed before follow-up prompt — continuing anyway"
+                    );
+                } else {
+                    tracing::info!(
+                        session_id = %sid,
+                        "session aborted before follow-up prompt (clears any pending tool)"
+                    );
+                }
+                client
+                    .get_session(sid)
+                    .await
+                    .map_err(|e| RunBuildError::AiProviderError(e.to_string()))?
+            }
             None => {
                 let s = client
                     .create_session(Some(&format!("build-{build_id}")))
@@ -260,6 +329,12 @@ impl RunBuildSystem for super::AppSystems {
             // via the same session.
             let mut awaiting_user_reply = false;
             let mut awaiting_question: Option<String> = None;
+            // Populated when OpenCode emits a `session.error` event (upstream
+            // model/provider failure). We keep the loop alive so the follow-up
+            // `session.idle` still flushes, but the outer code will see this
+            // value and fail the build rather than mark it succeeded with 0
+            // artifacts. See `summarize_session_error` for the extraction.
+            let mut provider_error: Option<String> = None;
             let forwarder_started = tokio::time::Instant::now();
             let mut last_progress = forwarder_started;
             let mut last_heartbeat_log = forwarder_started;
@@ -636,12 +711,30 @@ impl RunBuildSystem for super::AppSystems {
                                 || raw_type.ends_with(".error")
                                 || raw_type.contains("abort");
                             if is_session_error {
+                                let summary = summarize_session_error(&data);
                                 tracing::error!(
                                     session_id = %session_id_bg,
                                     event_type = %raw_type,
+                                    summary = %summary,
                                     payload = %data,
                                     "OpenCode error event"
                                 );
+                                if provider_error.is_none() {
+                                    provider_error = Some(summary.clone());
+                                }
+                                // Surface the provider error as a chat chunk so
+                                // the user sees something actionable, not just
+                                // a silent failure.
+                                let chunk = format!("\n[provider error] {summary}\n");
+                                log_buf.push_str(&chunk);
+                                publish_event(
+                                    proj_id,
+                                    BuildEvent::MessageChunk {
+                                        job_id: job_id_bg.clone(),
+                                        text: chunk,
+                                    },
+                                )
+                                .await;
                             } else if raw_type.starts_with("tool.") {
                                 let tool = data
                                     .get("tool")
@@ -720,7 +813,10 @@ impl RunBuildSystem for super::AppSystems {
                 "SSE forwarder exit summary"
             );
 
-            if completed { Some(log_buf) } else { None }
+            ForwarderOutcome {
+                log_buf: if completed { Some(log_buf) } else { None },
+                provider_error,
+            }
         });
 
         // Wait up to 15s for the SSE stream to connect before sending prompt
@@ -774,10 +870,12 @@ impl RunBuildSystem for super::AppSystems {
         tracing::info!(session_id = %session.id, "prompt sent, waiting for completion via SSE");
 
         // Wait for the event forwarder to finish (session idle or legacy message.completed).
-        // Returns Some(log text) on success, None if SSE failed or timed out.
-        let forwarder_result = forwarder.await.unwrap_or(None);
-
-        let sse_observed_idle = forwarder_result.is_some();
+        let forwarder_outcome = forwarder.await.unwrap_or(ForwarderOutcome {
+            log_buf: None,
+            provider_error: Some("forwarder task panicked".to_string()),
+        });
+        let provider_error = forwarder_outcome.provider_error.clone();
+        let sse_observed_idle = forwarder_outcome.log_buf.is_some();
         if !sse_observed_idle {
             tracing::warn!(
                 session_id = %session.id,
@@ -787,7 +885,7 @@ impl RunBuildSystem for super::AppSystems {
             // Fall through: try to collect whatever diffs exist anyway.
         }
 
-        let assistant_content = forwarder_result.unwrap_or_default();
+        let assistant_content = forwarder_outcome.log_buf.unwrap_or_default();
 
         // Preview of the assistant reply — truncated to keep logs readable but
         // long enough to catch "I was unable to …" style graceful failures
@@ -825,6 +923,45 @@ impl RunBuildSystem for super::AppSystems {
             truncated = diffs.len() > diff_paths_preview.len(),
             "collected OpenCode session diff"
         );
+
+        // Guard: upstream provider error (e.g. 502 "Network connection lost"
+        // from the model backend). OpenCode emits `session.error` and then
+        // idles immediately — without this branch the build would be marked
+        // "succeeded" with 0 artifacts, trip the demo gate, and silently
+        // hide the real failure. Fail loudly and keep any partial diffs
+        // for diagnostics (artifacts are persisted below only when the
+        // branch above does NOT fire).
+        if let Some(err_msg) = provider_error.as_ref() {
+            tracing::error!(
+                session_id = %session.id,
+                provider_error = %err_msg,
+                diff_count = diffs.len(),
+                "aborting run_build: OpenCode reported a provider error"
+            );
+
+            let _ = sqlx::query(
+                "UPDATE build_jobs \
+                 SET status = 'failed', error_message = $2, duration_ms = $3, \
+                     updated_at = NOW() \
+                 WHERE id = $1",
+            )
+            .bind(build_id)
+            .bind(err_msg)
+            .bind(started.elapsed().as_millis() as i64)
+            .execute(pool)
+            .await;
+
+            publish_event(
+                project_id,
+                BuildEvent::BuildError {
+                    job_id: build_id.to_string(),
+                    error: err_msg.clone(),
+                },
+            )
+            .await;
+
+            return Err(RunBuildError::AiProviderError(err_msg.clone()));
+        }
 
         // Guard against a false-success cascade: if we never saw session-idle
         // AND OpenCode produced no diffs, the prompt almost certainly did not

@@ -527,16 +527,20 @@ function PreviewPanel({
   deploymentId,
   status,
   statusDetail,
+  reloadNonce,
 }: {
   deploymentId: string | null;
   status: string | null;
   /** Latest deploy / setup message while the container or dev server is coming up */
   statusDetail: string | null;
+  /** Bumped by parent on build.complete to force a post-restart iframe reload. */
+  reloadNonce: number;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [currentUrl, setCurrentUrl] = useState("");
   const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
+  const lastNonceRef = useRef(reloadNonce);
 
   const baseUrl = deploymentId ? `/env/${deploymentId}/` : "";
 
@@ -575,6 +579,68 @@ function PreviewPanel({
       iframeRef.current.src = currentUrl;
     }
   }, [currentUrl]);
+
+  // When the parent signals a fresh build (nonce bump), force the iframe to
+  // re-fetch. Vite HMR doesn't work through the proxy (no WebSocket upgrade),
+  // so after the dev server restart the iframe would otherwise show stale HTML
+  // (often still referencing assets from the killed Vite process).
+  //
+  // Important subtleties:
+  // 1. Only bump `lastNonceRef` once we actually schedule a reload — otherwise
+  //    if `currentUrl` is not yet set when the nonce arrives, the effect will
+  //    return early, mark the nonce as consumed, and never retry when
+  //    `currentUrl` populates a render later.
+  // 2. Don't trust the health probe — it only proves Vite is listening, not
+  //    that Astro finished compiling the first request. Poll the proxied
+  //    `baseUrl` until it returns 200 before swapping the iframe's src.
+  useEffect(() => {
+    if (reloadNonce === lastNonceRef.current) return;
+    if (!currentUrl || !baseUrl) return;
+    lastNonceRef.current = reloadNonce;
+
+    let cancelled = false;
+    let attempt = 0;
+    const maxAttempts = 25;
+
+    const swapSrc = () => {
+      const el = iframeRef.current;
+      if (!el) return;
+      const sep = currentUrl.includes("?") ? "&" : "?";
+      el.src = `${currentUrl}${sep}__sc_reload=${reloadNonce}`;
+    };
+
+    const ping = () => {
+      if (cancelled) return;
+      attempt += 1;
+      fetch(baseUrl, { cache: "no-store", credentials: "same-origin" })
+        .then((r) => {
+          if (cancelled) return;
+          if (r.ok) {
+            swapSrc();
+            return;
+          }
+          if (attempt < maxAttempts) {
+            window.setTimeout(ping, 800);
+          } else {
+            swapSrc();
+          }
+        })
+        .catch(() => {
+          if (cancelled) return;
+          if (attempt < maxAttempts) {
+            window.setTimeout(ping, 800);
+          } else {
+            swapSrc();
+          }
+        });
+    };
+
+    const t = window.setTimeout(ping, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(t);
+    };
+  }, [reloadNonce, currentUrl, baseUrl]);
 
   const handleBack = useCallback(() => {
     if (historyIdx > 0) {
@@ -623,6 +689,11 @@ function PreviewPanel({
           canGoForward={historyIdx < history.length - 1}
         />
         <iframe
+          // key remounts the iframe on each build so a stale document from
+          // before a dev-server restart never lingers. Without this, React
+          // reuses the same element and the browser may serve a cached
+          // response on repeat navigations to the same URL.
+          key={reloadNonce}
           ref={iframeRef}
           src={currentUrl || baseUrl}
           onLoad={handleIframeLoad}
@@ -756,6 +827,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   const [previewStatusDetail, setPreviewStatusDetail] = useState<string | null>(
     null,
   );
+  const [previewReloadNonce, setPreviewReloadNonce] = useState(0);
   const [projectScope, setProjectScope] = useState<string>("frontend");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -791,7 +863,20 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         const res = await fetch(`/api/build_jobs/${jobId}`);
         if (!res.ok) return;
         const data: BuildJob = await res.json();
-        setJob((p) => mergeBuildJob(p, data));
+        setJob((prev) => {
+          const merged = mergeBuildJob(prev, data);
+          // Fallback path: SSE dropped, poller is the one seeing success.
+          // Bump the preview nonce on the running→succeeded transition only,
+          // so we don't thrash the iframe on every poll after completion.
+          if (
+            merged.status === "succeeded" &&
+            prev?.status !== "succeeded" &&
+            merged.deployment_id
+          ) {
+            setPreviewReloadNonce((n) => n + 1);
+          }
+          return merged;
+        });
         if (TERMINAL_STATUSES.has(data.status)) {
           stopPolling();
           setIsLoading(false);
@@ -913,6 +998,12 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         setIsLoading(false);
 
         fetchProjectScope();
+
+        // The backend restarts `mise run dev` after a successful build.
+        // Signal PreviewPanel to refetch the iframe once Vite is back up.
+        if (data.status === "succeeded") {
+          setPreviewReloadNonce((n) => n + 1);
+        }
 
         if (data.job_id) {
           scheduleBuildJobRefetches(data.job_id, setJob);
@@ -1140,6 +1231,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
             deploymentId={job?.deployment_id ?? null}
             status={job?.status ?? null}
             statusDetail={previewStatusDetail}
+            reloadNonce={previewReloadNonce}
           />
         </div>
       </div>

@@ -27,8 +27,11 @@ pub fn subscribe(
         builder = builder.header(reqwest::header::AUTHORIZATION, auth.as_str());
     }
 
-    let mut es = EventSource::new(builder).map_err(|e| Error::SseError(e.to_string()))?;
-    es.set_retry_policy(Box::new(reqwest_eventsource::retry::Never));
+    let es = EventSource::new(builder).map_err(|e| Error::SseError(e.to_string()))?;
+    // Keep the default ExponentialBackoff retry policy. Long OpenCode sessions
+    // occasionally surface transient body-decode errors; auto-reconnect uses
+    // `Last-Event-ID` and lets the stream self-heal instead of the host
+    // forwarder bailing out on the first hiccup.
 
     Ok(SseStream { es })
 }

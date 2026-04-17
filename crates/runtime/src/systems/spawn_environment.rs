@@ -3,6 +3,7 @@ use opencode_client::types::BuildEvent;
 use sqlx::Row;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tracing::Instrument;
 
 const DEFAULT_REPO_URL: &str = "https://github.com/pinsky-three/stem-cell-shrank";
 const CONTAINER_MEMORY_LIMIT: &str = "2g";
@@ -245,30 +246,37 @@ impl SpawnEnvironmentSystem for super::AppSystems {
     ) -> Result<SpawnEnvironmentOutput, SpawnEnvironmentError> {
         super::cleanup_deployments::ensure_periodic_cleanup(pool.clone());
 
+        // Use `.instrument(span).await` instead of holding an Enter guard
+        // across `.await` points. The guard form is unsound in async code —
+        // tasks polled across threads can drop guards out of order relative
+        // to span lifetimes, which made tracing-subscriber panic with
+        // "tried to clone a span that already closed" on follow-up calls.
         let span = tracing::info_span!(
             "spawn_environment",
             org_id = %input.org_id,
             user_id = %input.user_id,
         );
-        let _enter = span.enter();
+        async move {
+            let work = async {
+                if let Some(pid) = input.project_id {
+                    append_prompt_and_queue_opencode(pool, &input, pid).await
+                } else {
+                    create_records(pool, &input).await
+                }
+            };
 
-        let work = async {
-            if let Some(pid) = input.project_id {
-                append_prompt_and_queue_opencode(pool, &input, pid).await
-            } else {
-                create_records(pool, &input).await
-            }
-        };
-
-        match tokio::time::timeout(HANDLER_TIMEOUT, work).await {
-            Ok(inner) => inner,
-            Err(_) => {
-                tracing::error!("handler timed out waiting for database");
-                Err(SpawnEnvironmentError::DatabaseError(
-                    "request timed out — database may be overloaded".into(),
-                ))
+            match tokio::time::timeout(HANDLER_TIMEOUT, work).await {
+                Ok(inner) => inner,
+                Err(_) => {
+                    tracing::error!("handler timed out waiting for database");
+                    Err(SpawnEnvironmentError::DatabaseError(
+                        "request timed out — database may be overloaded".into(),
+                    ))
+                }
             }
         }
+        .instrument(span)
+        .await
     }
 }
 

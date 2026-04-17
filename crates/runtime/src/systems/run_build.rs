@@ -4,6 +4,7 @@ use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
+use tracing::Instrument;
 
 /// Global event bus: project_id → broadcast sender for build events.
 /// The SSE endpoint subscribes to this; RunBuild publishes to it.
@@ -94,8 +95,16 @@ impl RunBuildSystem for super::AppSystems {
         pool: &sqlx::PgPool,
         input: RunBuildInput,
     ) -> Result<RunBuildOutput, RunBuildError> {
+        // IMPORTANT: Use `.instrument(span).await` instead of
+        // `let _enter = span.enter();`. Holding an Enter guard across `.await`
+        // points is unsound: the task may be polled on a different thread,
+        // and the guard can be dropped out of order with respect to the span's
+        // real lifetime. In practice that caused tracing-subscriber to panic
+        // with "tried to clone a span that already closed" as soon as a
+        // follow-up build re-entered this function while a prior span's
+        // handles were still being dereferenced downstream.
         let span = tracing::info_span!("run_build", build_job_id = %input.build_job_id);
-        let _enter = span.enter();
+        async move {
 
         // ── Load build job ────────────────────────────────────
         let build_row = sqlx::query(
@@ -214,15 +223,46 @@ impl RunBuildSystem for super::AppSystems {
         // Signal from forwarder → main task when SSE is connected
         let (connected_tx, connected_rx) = tokio::sync::oneshot::channel::<()>();
 
-        // The forwarder returns Some(log_buf) on session idle / message completed, None on error/timeout.
+        // Verbose mode dumps every non-heartbeat event at INFO level. Enable via
+        //   STEM_CELL_RUN_BUILD_VERBOSE=1
+        // when diagnosing silent stalls in production. Keep off by default to
+        // avoid log spam at ~100 chunks/sec during heavy streaming.
+        let verbose = std::env::var("STEM_CELL_RUN_BUILD_VERBOSE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        // The forwarder returns a rich ForwarderOutcome so the main task can
+        // reason about WHY we exited the loop (idle vs timeout vs stream-close
+        // vs fatal error) and how much work OpenCode reported.
         let forwarder = tokio::spawn(async move {
             use futures::StreamExt;
             let mut stream = std::pin::pin!(event_stream);
             let mut log_buf = String::new();
             let mut connected_tx = Some(connected_tx);
             let mut completed = false;
-            let mut part_text_seen: HashMap<String, String> = HashMap::new();
             let mut tool_calls_announced: HashSet<String> = HashSet::new();
+            // callID → (tool_name, last_status). We log every status transition
+            // so tool errors and stuck tools show up in the logs, not just
+            // initial invocations.
+            let mut tool_state: HashMap<String, (String, String)> = HashMap::new();
+            let mut tool_errors: u32 = 0;
+            let mut tool_completed: u32 = 0;
+            let mut stream_errors: u32 = 0;
+            let mut heartbeats: u32 = 0;
+            let mut message_completed_seen = false;
+            let mut session_idle_matched = false;
+            // OpenCode can call its `question`/`ask` tool to request user
+            // input, which stays `pending` until the user replies. Without
+            // short-circuiting, the forwarder waits up to `sse_secs` while
+            // the frontend input is locked (isLoading = true). We detect the
+            // first such tool and exit the loop so the UI unlocks and the
+            // next user message flows back to OpenCode as the tool's answer
+            // via the same session.
+            let mut awaiting_user_reply = false;
+            let mut awaiting_question: Option<String> = None;
+            let forwarder_started = tokio::time::Instant::now();
+            let mut last_progress = forwarder_started;
+            let mut last_heartbeat_log = forwarder_started;
             let sse_secs: u64 = std::env::var("STEM_CELL_RUN_BUILD_SSE_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.parse().ok())
@@ -230,16 +270,88 @@ impl RunBuildSystem for super::AppSystems {
                 .unwrap_or(1800);
             let deadline =
                 tokio::time::Instant::now() + tokio::time::Duration::from_secs(sse_secs);
+            // Reason the loop exits — surfaced in the summary log so we can
+            // see at a glance why a build ended.
+            let mut exit_reason = "unknown";
+
+            tracing::info!(
+                session_id = %session_id_bg,
+                sse_timeout_secs = sse_secs,
+                verbose,
+                "SSE forwarder started"
+            );
 
             loop {
+                // Short-circuit when OpenCode's `question`/`ask` tool is
+                // awaiting a user reply. Its state never advances on its own,
+                // so waiting for session.idle would block until the 30 min
+                // deadline. Exit cleanly so the UI unlocks; the next user
+                // message will flow into the same session as the tool's reply.
+                if awaiting_user_reply {
+                    exit_reason = "awaiting_user_reply";
+                    completed = true;
+                    tracing::info!(
+                        session_id = %session_id_bg,
+                        log_chars = log_buf.len(),
+                        tool_calls = tool_calls_announced.len(),
+                        tool_completed,
+                        tool_errors,
+                        question = ?awaiting_question,
+                        "exiting forwarder: OpenCode is awaiting user reply"
+                    );
+                    if !log_buf.is_empty() {
+                        let _ = sqlx::query(
+                            "UPDATE build_jobs SET logs = $2, updated_at = NOW() WHERE id = $1",
+                        )
+                        .bind(build_id_bg)
+                        .bind(&log_buf)
+                        .execute(&pool_bg)
+                        .await;
+                    }
+                    break;
+                }
+
+                // Progress heartbeat: every 30 s log activity counters so we
+                // can see silent stalls in production without verbose mode.
+                let now = tokio::time::Instant::now();
+                if now.duration_since(last_heartbeat_log).as_secs() >= 30 {
+                    last_heartbeat_log = now;
+                    tracing::info!(
+                        session_id = %session_id_bg,
+                        elapsed_secs = forwarder_started.elapsed().as_secs(),
+                        idle_secs = now.duration_since(last_progress).as_secs(),
+                        log_chars = log_buf.len(),
+                        tool_calls = tool_calls_announced.len(),
+                        tool_completed,
+                        tool_errors,
+                        heartbeats,
+                        stream_errors,
+                        "SSE forwarder progress"
+                    );
+                }
+
                 let next = tokio::time::timeout_at(deadline, stream.next()).await;
                 match next {
                     Err(_) => {
-                        tracing::warn!(timeout_secs = sse_secs, "SSE forwarder timed out");
+                        exit_reason = "deadline_timeout";
+                        tracing::warn!(
+                            session_id = %session_id_bg,
+                            timeout_secs = sse_secs,
+                            idle_for_secs = last_progress.elapsed().as_secs(),
+                            log_chars = log_buf.len(),
+                            tool_calls = tool_calls_announced.len(),
+                            "SSE forwarder timed out"
+                        );
                         break;
                     }
                     Ok(None) => {
-                        tracing::info!("SSE stream closed by server");
+                        exit_reason = "stream_closed_by_server";
+                        tracing::info!(
+                            session_id = %session_id_bg,
+                            elapsed_secs = forwarder_started.elapsed().as_secs(),
+                            log_chars = log_buf.len(),
+                            "SSE stream closed by server"
+                        );
                         break;
                     }
                     Ok(Some(event_result)) => match event_result {
@@ -249,7 +361,9 @@ impl RunBuildSystem for super::AppSystems {
                                 let _ = tx.send(());
                             }
                         }
-                        Ok(opencode_client::OpenCodeEvent::ServerHeartbeat) => {}
+                        Ok(opencode_client::OpenCodeEvent::ServerHeartbeat) => {
+                            heartbeats = heartbeats.saturating_add(1);
+                        }
                         Ok(opencode_client::OpenCodeEvent::MessagePartDelta { properties }) => {
                             let field = properties
                                 .get("field")
@@ -258,9 +372,15 @@ impl RunBuildSystem for super::AppSystems {
                             if !matches!(field, "text" | "reasoning") {
                                 continue;
                             }
+                            // Delta events are the authoritative streamed
+                            // source for text/reasoning. We intentionally
+                            // ignore `message.part.updated` snapshots for the
+                            // same content (see below), so there is nothing
+                            // to reconcile here.
                             if let Some(delta) = properties.get("delta").and_then(|v| v.as_str()) {
                                 if !delta.is_empty() {
                                     log_buf.push_str(delta);
+                                    last_progress = tokio::time::Instant::now();
                                     publish_event(
                                         proj_id,
                                         BuildEvent::MessageChunk {
@@ -280,70 +400,181 @@ impl RunBuildSystem for super::AppSystems {
                                     if let Some(call_id) =
                                         part.get("callID").and_then(|v| v.as_str())
                                     {
-                                        if tool_calls_announced.insert(call_id.to_string()) {
-                                            let tool = part
-                                                .get("tool")
+                                        let tool_name = part
+                                            .get("tool")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("tool")
+                                            .to_string();
+                                        let status = part
+                                            .get("state")
+                                            .and_then(|s| s.get("status"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+
+                                        // Log status transitions so tool errors and
+                                        // stuck tools are visible in the host logs.
+                                        let prev = tool_state
+                                            .insert(
+                                                call_id.to_string(),
+                                                (tool_name.clone(), status.clone()),
+                                            )
+                                            .map(|(_, s)| s)
+                                            .unwrap_or_default();
+                                        if status != prev && !status.is_empty() {
+                                            let is_error = status == "error"
+                                                || part
+                                                    .get("state")
+                                                    .and_then(|s| s.get("error"))
+                                                    .is_some();
+                                            if is_error {
+                                                tool_errors = tool_errors.saturating_add(1);
+                                                let err = part
+                                                    .get("state")
+                                                    .and_then(|s| s.get("error"))
+                                                    .cloned()
+                                                    .unwrap_or(serde_json::Value::Null);
+                                                tracing::error!(
+                                                    session_id = %session_id_bg,
+                                                    call_id,
+                                                    tool = %tool_name,
+                                                    status = %status,
+                                                    error = %err,
+                                                    "OpenCode tool reported error"
+                                                );
+                                            } else if status == "completed" {
+                                                tool_completed = tool_completed.saturating_add(1);
+                                                tracing::debug!(
+                                                    call_id,
+                                                    tool = %tool_name,
+                                                    "tool completed"
+                                                );
+                                            } else if verbose {
+                                                tracing::info!(
+                                                    call_id,
+                                                    tool = %tool_name,
+                                                    prev_status = %prev,
+                                                    status = %status,
+                                                    "tool state transition"
+                                                );
+                                            }
+                                        }
+
+                                        // Detect OpenCode's interactive tools
+                                        // that block the agent loop waiting
+                                        // for a user reply. Treat them as
+                                        // "soft completion" so the frontend
+                                        // unlocks and the next user message
+                                        // reaches OpenCode as the answer.
+                                        if !awaiting_user_reply
+                                            && status == "pending"
+                                            && matches!(
+                                                tool_name.as_str(),
+                                                "question" | "ask" | "user_input"
+                                            )
+                                        {
+                                            awaiting_user_reply = true;
+                                            awaiting_question = part
+                                                .get("state")
+                                                .and_then(|s| s.get("input"))
+                                                .and_then(|v| {
+                                                    v.get("question")
+                                                        .or_else(|| v.get("prompt"))
+                                                        .or_else(|| v.get("text"))
+                                                })
                                                 .and_then(|v| v.as_str())
-                                                .unwrap_or("tool")
-                                                .to_string();
+                                                .map(str::to_string);
+                                            // Surface the question as an
+                                            // assistant chunk so it renders
+                                            // in the chat panel — the tool
+                                            // input is not in the text stream
+                                            // otherwise.
+                                            if let Some(q) = awaiting_question.as_deref() {
+                                                let suffix =
+                                                    if log_buf.ends_with('\n') || log_buf.is_empty() {
+                                                        ""
+                                                    } else {
+                                                        "\n\n"
+                                                    };
+                                                let rendered = format!("{suffix}{q}");
+                                                log_buf.push_str(&rendered);
+                                                publish_event(
+                                                    proj_id,
+                                                    BuildEvent::MessageChunk {
+                                                        job_id: job_id_bg.clone(),
+                                                        text: rendered,
+                                                    },
+                                                )
+                                                .await;
+                                            }
+                                            tracing::info!(
+                                                session_id = %session_id_bg,
+                                                call_id,
+                                                tool = %tool_name,
+                                                question = ?awaiting_question,
+                                                "OpenCode is awaiting user reply — short-circuiting build"
+                                            );
+                                        }
+
+                                        if tool_calls_announced.insert(call_id.to_string()) {
                                             let args = part
                                                 .get("state")
                                                 .and_then(|s| s.get("input"))
                                                 .cloned()
                                                 .unwrap_or(serde_json::json!({}));
+                                            tracing::info!(
+                                                session_id = %session_id_bg,
+                                                call_id,
+                                                tool = %tool_name,
+                                                status = %status,
+                                                "OpenCode tool call"
+                                            );
                                             publish_event(
                                                 proj_id,
                                                 BuildEvent::ToolCall {
                                                     job_id: job_id_bg.clone(),
-                                                    tool,
+                                                    tool: tool_name,
                                                     args,
                                                 },
                                             )
                                             .await;
+                                            last_progress = tokio::time::Instant::now();
                                         }
                                     }
                                     continue;
                                 }
 
-                                if let Some(id) = part.get("id").and_then(|v| v.as_str()) {
-                                    let full_opt = match part.get("type").and_then(|t| t.as_str()) {
-                                        Some("text") | Some("reasoning") => part
-                                            .get("text")
-                                            .and_then(|v| v.as_str())
-                                            .map(str::to_string),
-                                        _ => None,
-                                    };
-                                    if let Some(full) = full_opt {
-                                        let prev = part_text_seen
-                                            .entry(id.to_string())
-                                            .or_insert_with(String::new);
-                                        let chunk = if full.len() > prev.len()
-                                            && full.starts_with(prev.as_str())
-                                        {
-                                            full[prev.len()..].to_string()
-                                        } else if full != *prev {
-                                            full.clone()
-                                        } else {
-                                            String::new()
-                                        };
-                                        *prev = full;
-                                        if !chunk.is_empty() {
-                                            log_buf.push_str(&chunk);
-                                            publish_event(
-                                                proj_id,
-                                                BuildEvent::MessageChunk {
-                                                    job_id: job_id_bg.clone(),
-                                                    text: chunk,
-                                                },
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                }
+                                // Text and reasoning parts are streamed via
+                                // `message.part.delta` events, which are the
+                                // authoritative source. OpenCode also emits
+                                // `message.part.updated` snapshots for the same
+                                // content — any diff math here risks double-
+                                // emission whenever delta's `partID` and
+                                // updated's `part.id` disagree or when a
+                                // snapshot arrives before the equivalent
+                                // deltas finish. We deliberately ignore
+                                // text/reasoning snapshots: the tool branch
+                                // above is the only thing we consume from
+                                // `message.part.updated`.
                             }
                         }
-                        Ok(opencode_client::OpenCodeEvent::MessageCompleted { .. }) => {
-                            tracing::info!("OpenCode message completed, flushing logs");
+                        Ok(opencode_client::OpenCodeEvent::MessageCompleted { properties }) => {
+                            message_completed_seen = true;
+                            exit_reason = "message_completed";
+                            let msg_id = properties
+                                .get("info")
+                                .and_then(|v| v.get("id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            tracing::info!(
+                                session_id = %session_id_bg,
+                                message_id = %msg_id,
+                                log_chars = log_buf.len(),
+                                tool_calls = tool_calls_announced.len(),
+                                tool_completed,
+                                tool_errors,
+                                "OpenCode message completed, flushing logs"
+                            );
                             completed = true;
                             if !log_buf.is_empty() {
                                 let _ = sqlx::query(
@@ -357,13 +588,23 @@ impl RunBuildSystem for super::AppSystems {
                             break;
                         }
                         Ok(opencode_client::OpenCodeEvent::SessionIdle { properties }) => {
-                            let matches_session = properties
+                            let sid = properties
                                 .get("sessionID")
                                 .and_then(|v| v.as_str())
-                                .map(|sid| sid == session_id_bg.as_str())
-                                .unwrap_or(false);
+                                .unwrap_or("");
+                            let matches_session = sid == session_id_bg.as_str();
                             if matches_session {
-                                tracing::info!("OpenCode session idle, flushing logs");
+                                session_idle_matched = true;
+                                exit_reason = "session_idle";
+                                tracing::info!(
+                                    session_id = %session_id_bg,
+                                    log_chars = log_buf.len(),
+                                    tool_calls = tool_calls_announced.len(),
+                                    tool_completed,
+                                    tool_errors,
+                                    elapsed_secs = forwarder_started.elapsed().as_secs(),
+                                    "OpenCode session idle, flushing logs"
+                                );
                                 completed = true;
                                 if !log_buf.is_empty() {
                                     let _ = sqlx::query(
@@ -375,10 +616,33 @@ impl RunBuildSystem for super::AppSystems {
                                     .await;
                                 }
                                 break;
+                            } else if verbose {
+                                tracing::info!(
+                                    other_session = %sid,
+                                    "session.idle for different session — ignoring"
+                                );
+                            }
+                        }
+                        Ok(opencode_client::OpenCodeEvent::SessionUpdated { properties }) => {
+                            if verbose {
+                                tracing::info!(?properties, "session.updated");
                             }
                         }
                         Ok(opencode_client::OpenCodeEvent::Unknown { raw_type, data }) => {
-                            if raw_type.starts_with("tool.") {
+                            // Surface potentially-fatal events: session errors,
+                            // permission prompts, rate-limit notices, etc. These
+                            // previously went to DEBUG and were invisible.
+                            let is_session_error = raw_type == "session.error"
+                                || raw_type.ends_with(".error")
+                                || raw_type.contains("abort");
+                            if is_session_error {
+                                tracing::error!(
+                                    session_id = %session_id_bg,
+                                    event_type = %raw_type,
+                                    payload = %data,
+                                    "OpenCode error event"
+                                );
+                            } else if raw_type.starts_with("tool.") {
                                 let tool = data
                                     .get("tool")
                                     .or_else(|| data.get("toolName"))
@@ -386,6 +650,12 @@ impl RunBuildSystem for super::AppSystems {
                                     .and_then(|v| v.as_str())
                                     .unwrap_or_else(|| raw_type.strip_prefix("tool.").unwrap_or(&raw_type))
                                     .to_string();
+                                tracing::info!(
+                                    session_id = %session_id_bg,
+                                    event_type = %raw_type,
+                                    tool = %tool,
+                                    "OpenCode tool event (unknown shape)"
+                                );
                                 publish_event(
                                     proj_id,
                                     BuildEvent::ToolCall {
@@ -396,19 +666,60 @@ impl RunBuildSystem for super::AppSystems {
                                 )
                                 .await;
                             } else if raw_type != "server.heartbeat" {
-                                tracing::debug!(event_type = %raw_type, "SSE event from OpenCode (unhandled)");
+                                if verbose {
+                                    tracing::info!(
+                                        event_type = %raw_type,
+                                        payload = %data,
+                                        "SSE event from OpenCode (unhandled)"
+                                    );
+                                } else {
+                                    tracing::debug!(event_type = %raw_type, "SSE event from OpenCode (unhandled)");
+                                }
                             }
                         }
                         Ok(ev) => {
-                            tracing::debug!(?ev, "SSE event (other)");
+                            if verbose {
+                                tracing::info!(?ev, "SSE event (other)");
+                            } else {
+                                tracing::debug!(?ev, "SSE event (other)");
+                            }
                         }
                         Err(e) => {
-                            tracing::warn!(error = %e, "SSE stream error");
-                            break;
+                            // Transient body-decode errors happen on long idle
+                            // periods; the underlying EventSource auto-retries
+                            // with Last-Event-ID, so keep polling. The overall
+                            // `sse_secs` deadline still bounds the wait.
+                            stream_errors = stream_errors.saturating_add(1);
+                            tracing::warn!(
+                                session_id = %session_id_bg,
+                                error = %e,
+                                stream_errors,
+                                elapsed_secs = forwarder_started.elapsed().as_secs(),
+                                "SSE stream error (continuing — EventSource will retry)"
+                            );
+                            continue;
                         }
                     },
                 }
             }
+            // One-shot summary that is easy to grep for when triaging builds.
+            // All counters are captured; `exit_reason` is the primary diagnosis.
+            tracing::info!(
+                session_id = %session_id_bg,
+                exit_reason,
+                completed,
+                message_completed_seen,
+                session_idle_matched,
+                log_chars = log_buf.len(),
+                tool_calls = tool_calls_announced.len(),
+                tool_completed,
+                tool_errors,
+                stream_errors,
+                heartbeats,
+                elapsed_secs = forwarder_started.elapsed().as_secs(),
+                "SSE forwarder exit summary"
+            );
+
             if completed { Some(log_buf) } else { None }
         });
 
@@ -433,6 +744,14 @@ impl RunBuildSystem for super::AppSystems {
         // the per-request model field uses a different format (object)
         // and is only needed for overrides, so we omit it.
         let oc_system = opencode_build_system_prompt(project_scope.as_str());
+        tracing::info!(
+            session_id = %session.id,
+            prompt_chars = prompt.len(),
+            system_chars = oc_system.as_deref().map(|s| s.len()).unwrap_or(0),
+            project_scope = %project_scope,
+            model = %model,
+            "sending OpenCode prompt"
+        );
         client
             .prompt_async(
                 &session.id,
@@ -443,7 +762,14 @@ impl RunBuildSystem for super::AppSystems {
                 oc_system.as_deref(),
             )
             .await
-            .map_err(|e| RunBuildError::AiProviderError(e.to_string()))?;
+            .map_err(|e| {
+                tracing::error!(
+                    session_id = %session.id,
+                    error = %e,
+                    "OpenCode prompt_async failed"
+                );
+                RunBuildError::AiProviderError(e.to_string())
+            })?;
 
         tracing::info!(session_id = %session.id, "prompt sent, waiting for completion via SSE");
 
@@ -451,7 +777,8 @@ impl RunBuildSystem for super::AppSystems {
         // Returns Some(log text) on success, None if SSE failed or timed out.
         let forwarder_result = forwarder.await.unwrap_or(None);
 
-        if forwarder_result.is_none() {
+        let sse_observed_idle = forwarder_result.is_some();
+        if !sse_observed_idle {
             tracing::warn!(
                 session_id = %session.id,
                 "SSE forwarder did not observe session idle — \
@@ -462,8 +789,81 @@ impl RunBuildSystem for super::AppSystems {
 
         let assistant_content = forwarder_result.unwrap_or_default();
 
+        // Preview of the assistant reply — truncated to keep logs readable but
+        // long enough to catch "I was unable to …" style graceful failures
+        // that the UI would otherwise swallow.
+        let assistant_preview: String = assistant_content.chars().take(400).collect();
+        tracing::info!(
+            session_id = %session.id,
+            assistant_chars = assistant_content.len(),
+            assistant_preview = %assistant_preview,
+            "OpenCode assistant reply"
+        );
+
         // ── Collect diffs as artifacts ─────────────────────────
-        let diffs = client.session_diff(&session.id).await.unwrap_or_default();
+        let diffs = match client.session_diff(&session.id).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    session_id = %session.id,
+                    error = %e,
+                    "session_diff request failed — treating as empty diff set"
+                );
+                Vec::new()
+            }
+        };
+        // Log a sample of paths so we can see what OpenCode actually touched.
+        let diff_paths_preview: Vec<&str> = diffs
+            .iter()
+            .take(40)
+            .map(|d| d.path.as_str())
+            .collect();
+        tracing::info!(
+            session_id = %session.id,
+            diff_count = diffs.len(),
+            paths = ?diff_paths_preview,
+            truncated = diffs.len() > diff_paths_preview.len(),
+            "collected OpenCode session diff"
+        );
+
+        // Guard against a false-success cascade: if we never saw session-idle
+        // AND OpenCode produced no diffs, the prompt almost certainly did not
+        // run to completion (common cause: reqwest body-decode drop on a long
+        // stream). Marking this "succeeded" would wrongly trip the demo gate,
+        // trigger a no-op Vite restart, and hide the failure from the user.
+        // Fail loudly instead so the UI can surface an actionable error.
+        if !sse_observed_idle && diffs.is_empty() {
+            let err_msg = "OpenCode did not report completion and produced no \
+                changes — SSE stream likely dropped mid-build. Retry the prompt.";
+            tracing::error!(
+                session_id = %session.id,
+                %err_msg,
+                "aborting run_build without marking succeeded"
+            );
+
+            let _ = sqlx::query(
+                "UPDATE build_jobs \
+                 SET status = 'failed', error_message = $2, duration_ms = $3, \
+                     updated_at = NOW() \
+                 WHERE id = $1",
+            )
+            .bind(build_id)
+            .bind(err_msg)
+            .bind(started.elapsed().as_millis() as i64)
+            .execute(pool)
+            .await;
+
+            publish_event(
+                project_id,
+                BuildEvent::BuildError {
+                    job_id: build_id.to_string(),
+                    error: err_msg.to_string(),
+                },
+            )
+            .await;
+
+            return Err(RunBuildError::AiProviderError(err_msg.to_string()));
+        }
 
         let mut artifacts_count: i32 = 0;
         for diff in &diffs {
@@ -540,7 +940,11 @@ impl RunBuildSystem for super::AppSystems {
         .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
 
         // ── Demo gate: mark project scope as "free" after first real build ──
-        if model != "opencode-repair" {
+        // Only count turns that actually changed files. OpenCode often replies
+        // with a clarifying question (e.g. "¿podrías darme más contexto?") and
+        // produces zero diffs — those must NOT consume the free-tier quota,
+        // otherwise the user can't even answer the question.
+        if model != "opencode-repair" && artifacts_count > 0 {
             sqlx::query(
                 "UPDATE projects SET scope = 'free', updated_at = NOW() \
                  WHERE id = $1 AND scope != 'free'",
@@ -549,7 +953,12 @@ impl RunBuildSystem for super::AppSystems {
             .execute(pool)
             .await
             .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
-            tracing::info!(%project_id, "project scope set to 'free' (demo limit)");
+            tracing::info!(%project_id, artifacts_count, "project scope set to 'free' (demo limit)");
+        } else if model != "opencode-repair" {
+            tracing::info!(
+                %project_id,
+                "skip demo-gate: build produced 0 artifacts (likely a clarifying question)"
+            );
         }
 
         // ── Record usage ──────────────────────────────────────
@@ -581,13 +990,22 @@ impl RunBuildSystem for super::AppSystems {
         )
         .await;
 
-        if model != "opencode-repair" {
+        // Only restart the dev server when files actually changed. A 0-artifact
+        // turn (clarifying question, thinking-only reply, webfetch-only research)
+        // doesn't need a Vite restart — and restarting causes the iframe to
+        // show a 502 Bad Gateway for ~5 s for no reason.
+        if model != "opencode-repair" && artifacts_count > 0 {
             super::spawn_environment::restart_deployment_after_opencode_build(pool, project_id)
                 .await;
-        } else {
+        } else if model == "opencode-repair" {
             tracing::debug!(
                 %project_id,
                 "skip deploy restart after opencode-repair — outer restart loop owns recovery"
+            );
+        } else {
+            tracing::info!(
+                %project_id,
+                "skip deploy restart: build produced 0 artifacts"
             );
         }
 
@@ -605,6 +1023,10 @@ impl RunBuildSystem for super::AppSystems {
             tokens_used,
             status: "succeeded".to_string(),
         })
+
+        }
+        .instrument(span)
+        .await
     }
 }
 

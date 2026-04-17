@@ -1,5 +1,6 @@
 use crate::system_api::*;
 use std::time::Duration;
+use tracing::Instrument;
 
 const DEFAULT_MAX_AGE_MINUTES: i32 = 60;
 const KILL_GRACE: Duration = Duration::from_secs(5);
@@ -21,38 +22,43 @@ impl CleanupDeploymentsSystem for super::AppSystems {
         pool: &sqlx::PgPool,
         input: CleanupDeploymentsInput,
     ) -> Result<CleanupDeploymentsOutput, CleanupDeploymentsError> {
+        // See run_build.rs for the rationale — `.instrument(span).await`
+        // rather than `span.enter()` avoids the cross-await soundness issues
+        // that panic tracing-subscriber's registry.
         let span = tracing::info_span!("cleanup_deployments");
-        let _enter = span.enter();
+        async move {
+            let deployments = fetch_targets(pool, &input).await?;
 
-        let deployments = fetch_targets(pool, &input).await?;
-
-        if deployments.is_empty() {
-            if input.deployment_id.is_some() {
-                return Err(CleanupDeploymentsError::DeploymentNotFound);
+            if deployments.is_empty() {
+                if input.deployment_id.is_some() {
+                    return Err(CleanupDeploymentsError::DeploymentNotFound);
+                }
+                return Ok(CleanupDeploymentsOutput {
+                    cleaned_count: 0,
+                    errors: String::new(),
+                    status: "nothing to clean".into(),
+                });
             }
-            return Ok(CleanupDeploymentsOutput {
-                cleaned_count: 0,
-                errors: String::new(),
-                status: "nothing to clean".into(),
-            });
+
+            let total = deployments.len();
+            let (cleaned, errors) = cleanup_batch(pool, &deployments).await;
+
+            let status = if errors.is_empty() {
+                format!("cleaned {cleaned}/{total}")
+            } else {
+                format!("cleaned {cleaned}/{total}, {} errors", errors.len())
+            };
+
+            tracing::info!(%status, "cleanup finished");
+
+            Ok(CleanupDeploymentsOutput {
+                cleaned_count: cleaned,
+                errors: errors.join("; "),
+                status,
+            })
         }
-
-        let total = deployments.len();
-        let (cleaned, errors) = cleanup_batch(pool, &deployments).await;
-
-        let status = if errors.is_empty() {
-            format!("cleaned {cleaned}/{total}")
-        } else {
-            format!("cleaned {cleaned}/{total}, {} errors", errors.len())
-        };
-
-        tracing::info!(%status, "cleanup finished");
-
-        Ok(CleanupDeploymentsOutput {
-            cleaned_count: cleaned,
-            errors: errors.join("; "),
-            status,
-        })
+        .instrument(span)
+        .await
     }
 }
 

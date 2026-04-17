@@ -144,6 +144,7 @@ fn rewrite_response_body(body: &[u8], deployment_id: uuid::Uuid, content_type: &
     if content_type.contains("text/html") {
         let rewritten = rewrite_html_attrs(text, &prefix);
         let rewritten = rewrite_asset_refs(&rewritten, &prefix);
+        let rewritten = inject_reload_script(&rewritten, &prefix);
         rewritten.into_bytes()
     } else if content_type.contains("javascript") || content_type.contains("text/css") {
         rewrite_asset_refs(text, &prefix).into_bytes()
@@ -198,12 +199,62 @@ fn rewrite_html_attrs(html: &str, prefix: &str) -> String {
     result
 }
 
-/// Rewrite `/_astro/` references in JS, CSS, and inline `<script>` blocks.
+/// Rewrite well-known dev-server path references in JS, CSS, and inline `<script>` blocks.
+/// Covers Astro build assets (`/_astro/`) and Vite internals that the attribute
+/// rewriter cannot reach (inline `import "/@vite/client"`, etc.).
 fn rewrite_asset_refs(text: &str, prefix: &str) -> String {
-    text.replace("\"/_astro/", &format!("\"{prefix}/_astro/"))
-        .replace("'/_astro/", &format!("'{prefix}/_astro/"))
-        .replace("`/_astro/", &format!("`{prefix}/_astro/"))
-        .replace("(/_astro/", &format!("({prefix}/_astro/")) // url() in CSS
+    const DEV_PREFIXES: &[&str] = &[
+        "/_astro/",
+        "/@vite/",
+        "/@id/",
+        "/@fs/",
+        "/node_modules/",
+        "/__vite_ping",
+    ];
+    let mut out = text.to_string();
+    for path in DEV_PREFIXES {
+        for opener in ["\"", "'", "`", "("] {
+            let needle = format!("{opener}{path}");
+            let replacement = format!("{opener}{prefix}{path}");
+            out = out.replace(&needle, &replacement);
+        }
+    }
+    out
+}
+
+/// Inject a lightweight script that detects dev-server restarts and triggers
+/// a page reload. Vite HMR doesn't work through the proxy (no WebSocket
+/// upgrade), so we poll `/__vite_ping` and reload on a down→up transition.
+///
+/// Design notes:
+/// - `d` tracks the last observed down state; reload fires on the edge
+///   `d && r.ok`, so a single missed tick (down phase shorter than the poll
+///   interval) is also covered by the parent-frame `build.complete` signal.
+/// - No kill-switch: Vite restarts after long builds can exceed any
+///   arbitrary cap. A permanent 2 s poll is cheap and bounded by the iframe
+///   lifetime (the iframe reloads invalidate this script automatically).
+/// - Reload uses a cache-buster so intermediate proxies don't serve stale HTML.
+fn inject_reload_script(html: &str, prefix: &str) -> String {
+    let script = format!(
+        r#"<script data-sc-reload>(function(){{var b="{}",d=false;function reload(){{try{{var u=new URL(location.href);u.searchParams.set("__sc_r",Date.now());location.replace(u.toString());}}catch(_){{location.reload();}}}}setInterval(function(){{fetch(b+"/__vite_ping",{{cache:"no-store"}}).then(function(r){{if(d&&r.ok){{reload();return;}}d=!r.ok;}}).catch(function(){{d=true;}});}},2000);}})();</script>"#,
+        prefix
+    );
+
+    if let Some(pos) = html.rfind("</body>") {
+        let mut out = String::with_capacity(html.len() + script.len());
+        out.push_str(&html[..pos]);
+        out.push_str(&script);
+        out.push_str(&html[pos..]);
+        out
+    } else if let Some(pos) = html.rfind("</html>") {
+        let mut out = String::with_capacity(html.len() + script.len());
+        out.push_str(&html[..pos]);
+        out.push_str(&script);
+        out.push_str(&html[pos..]);
+        out
+    } else {
+        format!("{html}{script}")
+    }
 }
 
 fn reqwest_headers(headers: &HeaderMap) -> reqwest::header::HeaderMap {

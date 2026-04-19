@@ -87,44 +87,110 @@ interface Message {
   role: string;
   content: string;
   created_at: string;
+  /** Interleaved record of text + tool calls + status updates produced by
+   *  the assistant in real time. Populated for messages finalized this
+   *  session; historical messages loaded from the server only carry
+   *  `content` and fall back to plain-text rendering. */
+  timeline?: TimelineItem[];
+}
+
+/** One entry in the interleaved in-flight assistant response.
+ *
+ *  Text chunks accrete into the trailing `text` item so prose reads
+ *  continuously; every `tool.call` and `deploy.status` pushes its own
+ *  item, which renders as a small inline chip between the surrounding
+ *  text. This structure is what lets the UI show tool invocations
+ *  *where they actually happened* in the reasoning flow, instead of
+ *  collecting them in a separate "tools used" sidebar at the top.
+ */
+type TimelineItem =
+  | { id: string; kind: "text"; content: string; timestamp: number }
+  | { id: string; kind: "tool"; label: string; timestamp: number }
+  | { id: string; kind: "status"; label: string; timestamp: number };
+
+/** Append text to the last text item (growing the assistant's current
+ *  paragraph) or open a new text item if the timeline currently ends in
+ *  a chip. Kept as a pure helper so the SSE handlers stay tiny. */
+function appendTextToTimeline(
+  prev: TimelineItem[],
+  chunk: string,
+): TimelineItem[] {
+  if (!chunk) return prev;
+  const last = prev[prev.length - 1];
+  if (last && last.kind === "text") {
+    const updated: TimelineItem = { ...last, content: last.content + chunk };
+    return [...prev.slice(0, -1), updated];
+  }
+  return [
+    ...prev,
+    {
+      id: crypto.randomUUID(),
+      kind: "text",
+      content: chunk,
+      timestamp: Date.now(),
+    },
+  ];
+}
+
+/** Collapse the timeline's text items into a single string — used when
+ *  finalizing an assistant message so the server-side `content` field
+ *  (plain text) still matches what the user saw. */
+function timelineText(items: TimelineItem[]): string {
+  return items
+    .filter((i): i is Extract<TimelineItem, { kind: "text" }> => i.kind === "text")
+    .map((i) => i.content)
+    .join("");
 }
 
 // ── Tabs ────────────────────────────────────────────────────────────────
 
-type LeftTab = "chat" | "logs";
+type LeftTab = "chat" | "logs" | "preview";
 
 function TabBar({
   active,
   onChange,
   hasLogs,
+  hasLivePreview,
 }: {
   active: LeftTab;
   onChange: (t: LeftTab) => void;
   hasLogs: boolean;
+  /** Whether a preview is reachable (drives the mobile "Preview" tab's
+   *  live-dot indicator). Hidden entirely on md+ viewports because the
+   *  preview panel is permanently visible there. */
+  hasLivePreview: boolean;
 }) {
+  const tabClass = (isActive: boolean) =>
+    `px-4 py-2.5 text-xs font-medium transition ${
+      isActive
+        ? "border-b-2 border-indigo-500 text-neutral-100"
+        : "text-neutral-500 hover:text-neutral-300"
+    }`;
+
   return (
     <div className="flex border-b border-neutral-800">
-      <button
-        onClick={() => onChange("chat")}
-        className={`px-4 py-2.5 text-xs font-medium transition ${
-          active === "chat"
-            ? "border-b-2 border-indigo-500 text-neutral-100"
-            : "text-neutral-500 hover:text-neutral-300"
-        }`}
-      >
+      <button onClick={() => onChange("chat")} className={tabClass(active === "chat")}>
         Chat
       </button>
       <button
         onClick={() => onChange("logs")}
-        className={`relative px-4 py-2.5 text-xs font-medium transition ${
-          active === "logs"
-            ? "border-b-2 border-indigo-500 text-neutral-100"
-            : "text-neutral-500 hover:text-neutral-300"
-        }`}
+        className={`relative ${tabClass(active === "logs")}`}
       >
         Logs
         {hasLogs && active !== "logs" && (
           <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+        )}
+      </button>
+      {/* Preview tab is mobile-only. On md+ the preview panel is
+       *  always visible on the right, so exposing a "Preview" tab
+       *  there would just be dead UI. */}
+      <button
+        onClick={() => onChange("preview")}
+        className={`relative md:hidden ${tabClass(active === "preview")}`}
+      >
+        Preview
+        {hasLivePreview && active !== "preview" && (
+          <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-indigo-400" />
         )}
       </button>
     </div>
@@ -159,104 +225,105 @@ function LogViewer({ logs }: { logs: string }) {
   );
 }
 
-// ── Thinking step type ──────────────────────────────────────────────────
+// ── Timeline renderer ───────────────────────────────────────────────────
+//
+// Renders the interleaved assistant output (text + tool chips + status
+// lines) in chronological order. Used both for the *live* thinking
+// bubble (with a trailing caret) and for finalized assistant messages
+// in the chat history — same component, different callers.
 
-interface ThinkingStep {
-  id: string;
-  kind: "tool" | "status";
-  label: string;
-  timestamp: number;
+function ToolChip({ label }: { label: string }) {
+  return (
+    <span className="my-1 inline-flex max-w-full items-center gap-1.5 rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 align-middle text-[11px] font-mono text-amber-300/90">
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        className="shrink-0"
+        aria-hidden="true"
+      >
+        <path d="M14.7 6.3a1 1 0 0 0 0-1.4l-1.6-1.6a1 1 0 0 0-1.4 0l-2 2L6 2 2 6l3.3 3.7-4 4a1 1 0 0 0 0 1.4l.6.6a1 1 0 0 0 1.4 0l4-4L11 15l4-4-3.3-2.7z" />
+      </svg>
+      <span className="truncate">{label}</span>
+    </span>
+  );
 }
 
-// ── Thinking bubble ────────────────────────────────────────────────────
+function StatusLine({ label }: { label: string }) {
+  return (
+    <span className="my-1 inline-flex items-center gap-1.5 align-middle text-[11px] italic text-neutral-500">
+      <span className="h-1 w-1 shrink-0 rounded-full bg-indigo-400/60" />
+      {label}
+    </span>
+  );
+}
 
-function ThinkingBubble({
-  steps,
-  streamingText,
+function TimelineView({
+  items,
+  streaming,
 }: {
-  steps: ThinkingStep[];
-  streamingText: string;
+  items: TimelineItem[];
+  /** When true, append a blinking caret after the last text segment —
+   *  we're still streaming. Finalized messages pass false. */
+  streaming: boolean;
 }) {
-  const [expanded, setExpanded] = useState(true);
-  const isActive = !streamingText && steps.length > 0;
-
-  if (steps.length === 0 && !streamingText) return null;
+  if (items.length === 0) return null;
+  // Last text item gets the caret; avoid attaching it to tool chips so
+  // the cursor doesn't visually "jump" into the chip.
+  const lastTextIdx = (() => {
+    for (let i = items.length - 1; i >= 0; i -= 1) {
+      if (items[i].kind === "text") return i;
+    }
+    return -1;
+  })();
 
   return (
-    <div className="flex justify-start">
-      <div className="max-w-[85%] w-full space-y-2">
-        {/* Thinking header + steps */}
-        {steps.length > 0 && (
-          <div className="rounded-xl bg-neutral-800/40 border border-neutral-800/60 overflow-hidden">
-            <button
-              onClick={() => setExpanded((v) => !v)}
-              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-neutral-500 hover:text-neutral-400 transition"
-            >
-              {isActive && (
-                <span className="flex gap-0.5">
-                  <span className="h-1 w-1 rounded-full bg-indigo-400 animate-bounce [animation-delay:0ms]" />
-                  <span className="h-1 w-1 rounded-full bg-indigo-400 animate-bounce [animation-delay:150ms]" />
-                  <span className="h-1 w-1 rounded-full bg-indigo-400 animate-bounce [animation-delay:300ms]" />
-                </span>
+    <div className="text-sm leading-relaxed text-neutral-300">
+      {items.map((item, idx) => {
+        if (item.kind === "text") {
+          const isLastText = idx === lastTextIdx;
+          return (
+            <span key={item.id} className="whitespace-pre-wrap">
+              {item.content}
+              {streaming && isLastText && (
+                <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-indigo-400/80 align-middle" />
               )}
-              {!isActive && (
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-              )}
-              <span className="font-medium">
-                {isActive ? "Thinking…" : "Thought process"}
-              </span>
-              <span className="ml-auto text-neutral-600">
-                {steps.length} step{steps.length !== 1 ? "s" : ""}
-              </span>
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                className={`transition-transform ${expanded ? "rotate-180" : ""}`}
-              >
-                <path d="M4 6l4 4 4-4" />
-              </svg>
-            </button>
-            {expanded && (
-              <div className="border-t border-neutral-800/60 px-3 py-2 space-y-1">
-                {steps.map((step) => (
-                  <div
-                    key={step.id}
-                    className="flex items-center gap-2 text-xs text-neutral-500"
-                  >
-                    {step.kind === "tool" ? (
-                      <svg
-                        width="11"
-                        height="11"
-                        viewBox="0 0 16 16"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        className="shrink-0 text-amber-500/70"
-                      >
-                        <path d="M14.7 6.3a1 1 0 0 0 0-1.4l-1.6-1.6a1 1 0 0 0-1.4 0l-2 2L6 2 2 6l3.3 3.7-4 4a1 1 0 0 0 0 1.4l.6.6a1 1 0 0 0 1.4 0l4-4L11 15l4-4-3.3-2.7z" />
-                      </svg>
-                    ) : (
-                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-400/60" />
-                    )}
-                    <span className="truncate">{step.label}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
+            </span>
+          );
+        }
+        if (item.kind === "tool") {
+          return (
+            <React.Fragment key={item.id}>
+              <ToolChip label={item.label} />
+              {/* trailing space so chips separate when two fire back-to-back */}{" "}
+            </React.Fragment>
+          );
+        }
+        return (
+          <React.Fragment key={item.id}>
+            <StatusLine label={item.label} />{" "}
+          </React.Fragment>
+        );
+      })}
+      {/* If the last timeline item is a tool/status and we're still
+       *  streaming, show a caret on its own line so the bubble still
+       *  signals "working…" even before the next text chunk arrives. */}
+      {streaming && lastTextIdx !== items.length - 1 && (
+        <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-indigo-400/80 align-middle" />
+      )}
+    </div>
+  );
+}
 
-        {/* Streaming response text */}
-        {streamingText && (
-          <div className="rounded-xl bg-neutral-800/60 px-4 py-2.5 text-sm leading-relaxed text-neutral-300 whitespace-pre-wrap">
-            {streamingText}
-            <span className="inline-block ml-0.5 w-1.5 h-4 bg-indigo-400/80 animate-pulse rounded-sm" />
-          </div>
-        )}
+function ThinkingBubble({ timeline }: { timeline: TimelineItem[] }) {
+  if (timeline.length === 0) return null;
+  return (
+    <div className="flex justify-start">
+      <div className="w-full max-w-[85%] rounded-xl bg-neutral-800/60 px-4 py-2.5">
+        <TimelineView items={timeline} streaming={true} />
       </div>
     </div>
   );
@@ -295,52 +362,51 @@ function ChatPanel({
   messages,
   onSend,
   isLoading,
-  thinkingSteps,
-  streamingText,
+  timeline,
   demoLimitReached,
 }: {
   messages: Message[];
   onSend: (msg: string) => void;
   isLoading: boolean;
-  thinkingSteps: ThinkingStep[];
-  streamingText: string;
+  /** In-flight interleaved assistant output — empty between builds. */
+  timeline: TimelineItem[];
   demoLimitReached: boolean;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, thinkingSteps.length, streamingText]);
+  }, [messages.length, timeline.length]);
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-thumb-neutral-700 scrollbar-track-transparent">
-        {messages.length === 0 &&
-          thinkingSteps.length === 0 &&
-          !streamingText && (
-            <div className="flex h-full items-center justify-center text-sm text-neutral-600">
-              Describe what you want to build.
-            </div>
-          )}
+        {messages.length === 0 && timeline.length === 0 && (
+          <div className="flex h-full items-center justify-center text-sm text-neutral-600">
+            Describe what you want to build.
+          </div>
+        )}
         {messages.map((m) => (
           <div
             key={m.id}
             className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
           >
             <div
-              className={`max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap ${
+              className={`max-w-[85%] rounded-xl px-4 py-2.5 text-sm leading-relaxed ${
                 m.role === "user"
-                  ? "bg-indigo-600/20 text-neutral-200"
+                  ? "bg-indigo-600/20 text-neutral-200 whitespace-pre-wrap"
                   : "bg-neutral-800/60 text-neutral-300"
               }`}
             >
-              {m.content}
+              {m.role === "assistant" && m.timeline && m.timeline.length > 0 ? (
+                <TimelineView items={m.timeline} streaming={false} />
+              ) : (
+                <span className="whitespace-pre-wrap">{m.content}</span>
+              )}
             </div>
           </div>
         ))}
-        {(thinkingSteps.length > 0 || streamingText) && (
-          <ThinkingBubble steps={thinkingSteps} streamingText={streamingText} />
-        )}
+        {timeline.length > 0 && <ThinkingBubble timeline={timeline} />}
         <div ref={bottomRef} />
       </div>
       {demoLimitReached ? (
@@ -865,8 +931,11 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [job, setJob] = useState<BuildJob | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [streamingText, setStreamingText] = useState("");
-  const [thinkingSteps, setThinkingSteps] = useState<ThinkingStep[]>([]);
+  // Single interleaved in-flight assistant response. Replaces the old
+  // separate `streamingText` / `thinkingSteps` pair, so tool invocations
+  // now appear *inline* where they were emitted instead of bunched into
+  // a separate "Thought process" bucket at the top of the bubble.
+  const [timeline, setTimeline] = useState<TimelineItem[]>([]);
   const [previewStatusDetail, setPreviewStatusDetail] = useState<string | null>(
     null,
   );
@@ -961,8 +1030,8 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           setIsLoading(true);
           setPreviewStatusDetail(null);
           setTab("chat");
-          setThinkingSteps((steps) =>
-            steps.length === 0
+          setTimeline((items) =>
+            items.length === 0
               ? [
                   {
                     id: crypto.randomUUID(),
@@ -971,7 +1040,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
                     timestamp: Date.now(),
                   },
                 ]
-              : steps,
+              : items,
           );
           startPolling(data.job_id);
         }
@@ -983,7 +1052,10 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     es.addEventListener("message.chunk", (e) => {
       try {
         const data: MessageChunkEvent = JSON.parse(e.data);
-        setStreamingText((prev) => prev + data.text);
+        // Text goes into the trailing text item so prose reads
+        // continuously, but any tool/status that landed since the last
+        // chunk stays *before* this new text in the timeline.
+        setTimeline((prev) => appendTextToTimeline(prev, data.text));
 
         // Append streaming text to logs too
         setJob((prev) =>
@@ -1001,7 +1073,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         setJob((prev) =>
           prev ? { ...prev, logs: (prev.logs || "") + logLine } : prev,
         );
-        setThinkingSteps((prev) => [
+        setTimeline((prev) => [
           ...prev,
           {
             id: crypto.randomUUID(),
@@ -1019,21 +1091,24 @@ export default function ProjectView({ projectId }: { projectId: string }) {
       try {
         const data: BuildCompleteEvent = JSON.parse(e.data);
 
-        // Finalize the streaming assistant message
-        setStreamingText((current) => {
-          if (current) {
+        // Finalize the in-flight assistant message: preserve the
+        // interleaved timeline on the message itself so the tool chips
+        // stay inline in the chat history (not just during streaming),
+        // and keep `content` as the flattened text for API/server parity.
+        setTimeline((current) => {
+          if (current.length > 0) {
             const finalMsg: Message = {
               id: crypto.randomUUID(),
               role: "assistant",
-              content: current,
+              content: timelineText(current),
               created_at: new Date().toISOString(),
+              timeline: current,
             };
             setMessages((prev) => [...prev, finalMsg]);
           }
-          return "";
+          return [];
         });
         streamingMsgIdRef.current = null;
-        setThinkingSteps([]);
         setPreviewStatusDetail(null);
 
         setJob((prev) =>
@@ -1079,8 +1154,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
             : prev,
         );
         setIsLoading(false);
-        setStreamingText("");
-        setThinkingSteps([]);
+        setTimeline([]);
         streamingMsgIdRef.current = null;
         setPreviewStatusDetail(null);
         setIsPreviewRestarting(false);
@@ -1092,8 +1166,8 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     es.addEventListener("deploy.status", (e) => {
       try {
         const data: DeployStatusEvent = JSON.parse(e.data);
-        setThinkingSteps((steps) => [
-          ...steps,
+        setTimeline((items) => [
+          ...items,
           {
             id: crypto.randomUUID(),
             kind: "status" as const,
@@ -1243,9 +1317,10 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     };
     setMessages((prev) => [...prev, optimistic]);
     setIsLoading(true);
-    setStreamingText("");
-    setThinkingSteps([]);
+    setTimeline([]);
     setPreviewStatusDetail(null);
+    // On mobile the user may currently be on the Preview tab — flip
+    // back to Chat so they see the agent's progress as it streams.
     setTab("chat");
 
     try {
@@ -1293,29 +1368,65 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         )}
       </header>
 
-      {/* Main area: left panel + right preview */}
+      {/* Main area: left panel + right preview.
+       *
+       *  Responsive layout:
+       *  - md+ (≥768px): classic split view. Left panel is a 420px
+       *    sidebar with Chat/Logs tabs; preview fills the rest. The
+       *    "Preview" tab is hidden in TabBar on md+.
+       *  - <md: single-column. The TabBar exposes a third "Preview"
+       *    tab; whichever tab is active takes the full viewport. This
+       *    keeps the left (chat) panel from squishing the preview into
+       *    a thin column that's effectively unusable on a phone. */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left panel */}
-        <div className="flex w-[420px] min-w-[320px] flex-col border-r border-neutral-800 bg-neutral-950">
-          <TabBar active={tab} onChange={setTab} hasLogs={!!job?.logs} />
+        {/* Left panel (Chat/Logs). On mobile this is hidden whenever
+         *  the user has swiped to the Preview tab. */}
+        <div
+          className={`${
+            tab === "preview" ? "hidden md:flex" : "flex"
+          } w-full md:w-[420px] md:min-w-[320px] flex-col border-r border-neutral-800 bg-neutral-950`}
+        >
+          <TabBar
+            active={tab}
+            onChange={setTab}
+            hasLogs={!!job?.logs}
+            hasLivePreview={
+              job?.status === "succeeded" && !!job?.deployment_id
+            }
+          />
           <div className="flex-1 overflow-hidden">
-            {tab === "chat" ? (
+            {tab === "logs" ? (
+              <LogViewer logs={job?.logs ?? ""} />
+            ) : (
+              // tab === "chat" or (mobile) "preview" while the left
+              // panel is hidden — rendering ChatPanel here is still
+              // correct because it's not visible anyway, and this
+              // avoids unmounting the chat state on tab switches.
               <ChatPanel
                 messages={messages}
                 onSend={handleSend}
                 isLoading={isLoading}
-                thinkingSteps={thinkingSteps}
-                streamingText={streamingText}
+                timeline={timeline}
                 demoLimitReached={demoLimitReached}
               />
-            ) : (
-              <LogViewer logs={job?.logs ?? ""} />
             )}
           </div>
         </div>
 
-        {/* Right panel: preview */}
-        <div className="flex-1 bg-neutral-900">
+        {/* Right panel: preview.
+         *  On mobile: visible only when tab === "preview".
+         *  On md+:    always visible to the right of the left panel.
+         *
+         *  `flex-col` is important: PreviewPanel's root is a height-
+         *  filling column with no explicit width, so a row-flex wrapper
+         *  would shrink it to its content width and shove the
+         *  "Building…" placeholder against the left edge instead of
+         *  centering it across the full panel. */}
+        <div
+          className={`${
+            tab === "preview" ? "flex" : "hidden md:flex"
+          } flex-1 flex-col bg-neutral-900`}
+        >
           <PreviewPanel
             deploymentId={job?.deployment_id ?? null}
             status={job?.status ?? null}

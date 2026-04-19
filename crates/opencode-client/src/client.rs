@@ -204,12 +204,32 @@ impl OpenCodeClient {
     // ── Diffs ─────────────────────────────────────────────────
 
     pub async fn session_diff(&self, session_id: &str) -> Result<Vec<FileDiff>> {
+        self.session_diff_with_raw(session_id).await.map(|(d, _)| d)
+    }
+
+    /// Same as `session_diff`, but also returns the raw JSON body.
+    /// Useful for diagnostic logging when we suspect a shape mismatch
+    /// between OpenCode's response and our `FileDiff` deserializer
+    /// (e.g. an empty `path` field hinting at a rename upstream).
+    pub async fn session_diff_with_raw(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<FileDiff>, String)> {
         let req = self
             .http
             .get(self.url(&format!("/session/{session_id}/diff")))
             .header(ACCEPT, "application/json");
         let resp = self.apply_auth(req).send().await?;
-        parse_response(resp).await
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(Error::ApiError {
+                status,
+                body: resp.text().await.unwrap_or_default(),
+            });
+        }
+        let body = resp.text().await?;
+        let diffs: Vec<FileDiff> = serde_json::from_str(&body).map_err(Error::Json)?;
+        Ok((diffs, body))
     }
 }
 

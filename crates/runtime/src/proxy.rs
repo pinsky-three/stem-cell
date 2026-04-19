@@ -99,7 +99,7 @@ async fn do_proxy(
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(%deployment_id, error = %e, "proxy upstream error");
-            return (StatusCode::BAD_GATEWAY, format!("upstream: {e}")).into_response();
+            return upstream_unavailable_response(&headers, &e.to_string());
         }
     };
 
@@ -108,7 +108,8 @@ async fn do_proxy(
     let body_bytes = match upstream.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            return (StatusCode::BAD_GATEWAY, format!("body read: {e}")).into_response();
+            tracing::warn!(%deployment_id, error = %e, "proxy body-read error");
+            return upstream_unavailable_response(&headers, &format!("body read: {e}"));
         }
     };
 
@@ -130,6 +131,82 @@ async fn do_proxy(
     response
         .body(Body::from(final_body))
         .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response())
+}
+
+/// 502 response when the upstream dev server is temporarily unreachable.
+///
+/// Why the split on `Accept`: when Vite is torn down during a deploy
+/// restart, _both_ the iframe's top-level document and its background
+/// chunk/HMR fetches hit this path. We want:
+///
+/// - Document requests (iframe navigation, user refresh) → a minimal HTML
+///   page that renders as a neutral "Preview updating…" card and quietly
+///   reloads itself. No matter how the React overlay happens to be
+///   layered, the iframe's own content is never the scary-looking
+///   `upstream: error sending request for url …` plaintext.
+/// - Everything else (JS chunks, `__vite_ping`, fetch/XHR) → the short
+///   plaintext body. Vite's HMR client expects a non-2xx here and its
+///   own reconnect logic handles it; replacing the body with HTML would
+///   break dev-tools network traces for no gain.
+///
+/// The HTML includes a meta-refresh as a last-resort fallback for
+/// when the parent page can't drive the reload (e.g. user opened the
+/// proxied URL directly in a new tab outside the main app).
+fn upstream_unavailable_response(req_headers: &HeaderMap, err: &str) -> Response {
+    let accepts_html = req_headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false);
+
+    if !accepts_html {
+        return (StatusCode::BAD_GATEWAY, format!("upstream: {err}")).into_response();
+    }
+
+    // NOTE: keep this tiny — it is served every ~800 ms during a restart
+    // and we'd rather the UX feel snappy than the page look polished.
+    // Tailwind isn't available here (this is raw proxy-served HTML), so
+    // inline styles only.
+    let html = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="2">
+    <title>Preview updating…</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 12px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0a0a0a; color: #e5e5e5;
+      }
+      .spinner {
+        width: 28px; height: 28px; border-radius: 50%;
+        border: 2px solid #3f3f46; border-top-color: #818cf8;
+        animation: spin 0.9s linear infinite;
+      }
+      p.detail { color: #a1a1aa; font-size: 12px; max-width: 20rem; text-align: center; line-height: 1.5; }
+      p.title { font-size: 14px; font-weight: 500; margin: 0; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="spinner" aria-hidden="true"></div>
+    <p class="title">Preview is updating…</p>
+    <p class="detail">The dev server is restarting to apply your latest change. This page will reload automatically.</p>
+  </body>
+</html>"#;
+
+    Response::builder()
+        .status(StatusCode::BAD_GATEWAY)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(Body::from(html))
+        .unwrap_or_else(|_| {
+            (StatusCode::BAD_GATEWAY, format!("upstream: {err}")).into_response()
+        })
 }
 
 /// Rewrite absolute paths in proxied responses so `/_astro/...`, `/favicon.png`,

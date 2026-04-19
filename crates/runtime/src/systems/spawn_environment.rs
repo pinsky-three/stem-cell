@@ -1488,6 +1488,18 @@ pub(super) async fn restart_deployment_after_opencode_build(
         return;
     }
 
+    // Let the frontend hide the iframe behind a "restarting preview…" overlay
+    // for the ~10–15 s window where Vite is down and the proxy can only
+    // return 502s. Without this event the user sees raw "upstream error"
+    // and can't tell the preview is about to come back on its own.
+    publish_deploy_status(
+        project_id,
+        spawn_job_id,
+        "restart_started",
+        "Applying changes and restarting preview…",
+    )
+    .await;
+
     if let Some(pid) = old_pid {
         let _ = sqlx::query(
             "UPDATE deployments SET pid = NULL, updated_at = NOW() \
@@ -1555,6 +1567,13 @@ pub(super) async fn restart_deployment_after_opencode_build(
         {
             Ok(()) => {
                 tracing::info!(%deployment_id, "deploy restart complete");
+                publish_deploy_status(
+                    project_id,
+                    spawn_job_id,
+                    "restart_healthy",
+                    "Preview is ready.",
+                )
+                .await;
                 return;
             }
             Err(e) => {
@@ -1571,6 +1590,13 @@ pub(super) async fn restart_deployment_after_opencode_build(
     }
 
     tracing::error!(%deployment_id, error = %last_err, "deploy restart exhausted attempts");
+    publish_deploy_status(
+        project_id,
+        spawn_job_id,
+        "restart_failed",
+        &format!("Preview restart failed: {last_err}"),
+    )
+    .await;
 }
 
 /// One `mise run dev` + health wait + attach log stream (existing deployment row).
@@ -1858,6 +1884,60 @@ async fn invoke_run_build(
     .await
 }
 
+/// True if an `AiProviderError` looks like a transient upstream hiccup
+/// that is safe to retry with a fresh session. These are network-layer
+/// failures from OpenCode's LLM backend — the agent never got to act on
+/// anything, so replaying the prompt is idempotent in practice.
+///
+/// We keep the list of patterns narrow on purpose: a retry on a semantic
+/// error (bad prompt, tool error, quota exceeded) would just burn time
+/// and end in the same failure, so we'd rather surface it to the user.
+fn is_transient_provider_error(msg: &str) -> bool {
+    let m = msg.to_ascii_lowercase();
+    m.contains("network connection lost")
+        || m.contains("provider_unavailable")
+        || m.contains("provider unavailable")
+        || m.contains("502")
+        || m.contains("503")
+        || m.contains("504")
+        || m.contains("timeout")
+        || m.contains("timed out")
+        || m.contains("ecconnreset")
+        || m.contains("connection reset")
+        || m.contains("temporarily unavailable")
+}
+
+/// Reset a build job row to a pre-run state so `execute` can be retried
+/// cleanly: fresh session (no reuse), no stale error_message, status back
+/// to `running` so the UI keeps its spinner instead of flashing failed.
+async fn reset_build_job_for_retry(
+    pool: &sqlx::PgPool,
+    build_job_id: uuid::Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE build_jobs \
+         SET status = 'running', \
+             error_message = NULL, \
+             opencode_session_id = NULL, \
+             updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(build_job_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn provider_retry_max_attempts() -> u32 {
+    // total attempts, not retries. default 3 = first try + 2 retries.
+    // Each retry costs one prompt replay (~30–180 s), so keep it tight.
+    std::env::var("OPENCODE_PROVIDER_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v.clamp(1, 5))
+        .unwrap_or(3)
+}
+
 /// Queue one OpenCode build job and run it to completion (blocks).
 async fn run_one_opencode_build(
     pool: &sqlx::PgPool,
@@ -1894,17 +1974,84 @@ async fn run_one_opencode_build(
 
     tracing::info!(%project_id, %oc_job_id, %model, "OpenCode build job queued");
 
-    match invoke_run_build(pool, oc_job_id).await {
-        Ok(output) => Ok(output),
-        Err(e) => {
-            let _ = sqlx::query(
-                "UPDATE build_jobs SET status = 'failed', error_message = $2, updated_at = NOW() WHERE id = $1",
-            )
-            .bind(oc_job_id)
-            .bind(format!("{e:?}"))
-            .execute(pool)
-            .await;
-            Err(format!("{e:?}"))
+    // Bounded retry on transient upstream provider errors (e.g. OpenCode's
+    // LLM backend returning 502 "Network connection lost"). These fail the
+    // build before any diffs are produced, so replaying the prompt is
+    // effectively idempotent — and it hides a very common source of
+    // spurious user-facing failures behind ~a few seconds of extra wait.
+    let max_attempts = provider_retry_max_attempts();
+    let mut attempt: u32 = 1;
+    loop {
+        match invoke_run_build(pool, oc_job_id).await {
+            Ok(output) => return Ok(output),
+            Err(e) => {
+                let err_str = format!("{e:?}");
+                let is_provider_error = matches!(
+                    &e,
+                    crate::system_api::RunBuildError::AiProviderError(_)
+                );
+                let transient = is_provider_error && is_transient_provider_error(&err_str);
+
+                if transient && attempt < max_attempts {
+                    // Exponential-ish backoff: 3s, 7s, 15s, ...
+                    let backoff_secs = 3u64 * (1u64 << (attempt - 1).min(4));
+                    tracing::warn!(
+                        %project_id,
+                        %oc_job_id,
+                        attempt,
+                        max_attempts,
+                        backoff_secs,
+                        error = %err_str,
+                        "transient OpenCode provider error — resetting build row and retrying"
+                    );
+
+                    publish_deploy_status(
+                        project_id,
+                        oc_job_id,
+                        "provider_retry",
+                        &format!(
+                            "AI provider hiccup — retrying (attempt {next}/{max})…",
+                            next = attempt + 1,
+                            max = max_attempts,
+                        ),
+                    )
+                    .await;
+
+                    if let Err(reset_err) = reset_build_job_for_retry(pool, oc_job_id).await {
+                        tracing::warn!(
+                            %oc_job_id,
+                            error = %reset_err,
+                            "failed to reset build_jobs row before retry — continuing anyway"
+                        );
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                    attempt += 1;
+                    continue;
+                }
+
+                // Non-retryable, or retries exhausted. Mark failed and surface.
+                let _ = sqlx::query(
+                    "UPDATE build_jobs SET status = 'failed', error_message = $2, \
+                     updated_at = NOW() WHERE id = $1",
+                )
+                .bind(oc_job_id)
+                .bind(&err_str)
+                .execute(pool)
+                .await;
+
+                if transient {
+                    tracing::error!(
+                        %project_id,
+                        %oc_job_id,
+                        attempt,
+                        max_attempts,
+                        error = %err_str,
+                        "OpenCode provider retries exhausted — giving up"
+                    );
+                }
+                return Err(err_str);
+            }
         }
     }
 }

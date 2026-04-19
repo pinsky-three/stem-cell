@@ -528,19 +528,35 @@ function PreviewPanel({
   status,
   statusDetail,
   reloadNonce,
+  isRestarting,
+  onPreviewReady,
 }: {
   deploymentId: string | null;
   status: string | null;
   /** Latest deploy / setup message while the container or dev server is coming up */
   statusDetail: string | null;
-  /** Bumped by parent on build.complete to force a post-restart iframe reload. */
+  /** Bumped by parent on `restart_healthy` to force a post-restart iframe reload.
+   *  Must NOT be bumped on `build.complete` — Vite is still alive at that
+   *  point and swapping the src then triggers a chunk-load against a
+   *  dev server that's about to be killed. */
   reloadNonce: number;
+  /** While true, Vite is being torn down + restarted. Covers the iframe with
+   *  a friendly overlay so the user never sees the proxy's raw 502 response. */
+  isRestarting: boolean;
+  /** Called after a reload-triggered navigation finishes loading in the
+   *  iframe. Lets the parent drop the restart overlay at exactly the moment
+   *  the fresh document is visible — no flash of half-loaded content. */
+  onPreviewReady: () => void;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [currentUrl, setCurrentUrl] = useState("");
   const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState(-1);
   const lastNonceRef = useRef(reloadNonce);
+  // True between a nonce bump and the next iframe `onLoad`. Used to scope
+  // `onPreviewReady` to reload-triggered loads only, so normal in-iframe
+  // navigation (user clicking links) doesn't accidentally drop the overlay.
+  const pendingReloadRef = useRef(false);
 
   const baseUrl = deploymentId ? `/env/${deploymentId}/` : "";
 
@@ -605,6 +621,9 @@ function PreviewPanel({
     const swapSrc = () => {
       const el = iframeRef.current;
       if (!el) return;
+      // Flag the upcoming load as reload-triggered so `handleIframeLoad`
+      // knows to call `onPreviewReady` (which drops the restart overlay).
+      pendingReloadRef.current = true;
       const sep = currentUrl.includes("?") ? "&" : "?";
       el.src = `${currentUrl}${sep}__sc_reload=${reloadNonce}`;
     };
@@ -662,6 +681,15 @@ function PreviewPanel({
 
   // Track same-origin iframe navigation via load events
   const handleIframeLoad = useCallback(() => {
+    // If this load was triggered by a reload-after-restart, the new
+    // document is now painted — tell the parent to drop the overlay.
+    // (Unconditional: a failed navigation would still fire `onLoad` with
+    // a 502 body in the iframe, but covering that with an overlay
+    // indefinitely is worse than showing the error.)
+    if (pendingReloadRef.current) {
+      pendingReloadRef.current = false;
+      onPreviewReady();
+    }
     try {
       const loc = iframeRef.current?.contentWindow?.location.pathname;
       if (loc && loc !== currentUrl) {
@@ -674,7 +702,7 @@ function PreviewPanel({
     } catch {
       // cross-origin — ignore
     }
-  }, [currentUrl, history, historyIdx]);
+  }, [currentUrl, history, historyIdx, onPreviewReady]);
 
   if (status === "succeeded" && deploymentId) {
     return (
@@ -688,18 +716,33 @@ function PreviewPanel({
           canGoBack={historyIdx > 0}
           canGoForward={historyIdx < history.length - 1}
         />
-        <iframe
-          // key remounts the iframe on each build so a stale document from
-          // before a dev-server restart never lingers. Without this, React
-          // reuses the same element and the browser may serve a cached
-          // response on repeat navigations to the same URL.
-          key={reloadNonce}
-          ref={iframeRef}
-          src={currentUrl || baseUrl}
-          onLoad={handleIframeLoad}
-          className="flex-1 bg-white"
-          title="Live preview"
-        />
+        <div className="relative flex-1">
+          <iframe
+            // key remounts the iframe on each build so a stale document from
+            // before a dev-server restart never lingers. Without this, React
+            // reuses the same element and the browser may serve a cached
+            // response on repeat navigations to the same URL.
+            key={reloadNonce}
+            ref={iframeRef}
+            src={currentUrl || baseUrl}
+            onLoad={handleIframeLoad}
+            className="h-full w-full bg-white"
+            title="Live preview"
+          />
+          {isRestarting ? (
+            // Intentionally NOT `pointer-events-none`: while Vite is down,
+            // letting clicks pass through to the iframe would send them to
+            // a dead dev server and queue up more 502s. Swallowing them
+            // here is the correct behavior.
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-neutral-950/90 text-neutral-200 backdrop-blur-sm">
+              <div className="h-8 w-8 animate-spin rounded-full border-2 border-neutral-600 border-t-indigo-400" />
+              <p className="text-sm font-medium">Applying changes…</p>
+              <p className="max-w-xs text-center text-xs leading-relaxed text-neutral-400">
+                {statusDetail ?? "Preview is restarting. It will refresh automatically."}
+              </p>
+            </div>
+          ) : null}
+        </div>
       </div>
     );
   }
@@ -828,6 +871,12 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     null,
   );
   const [previewReloadNonce, setPreviewReloadNonce] = useState(0);
+  // Flips true while the deploy is being restarted (Vite killed → spawn →
+  // health). During this window the proxy returns 502s because the upstream
+  // dev server is genuinely down; surfacing those raw errors in the iframe
+  // makes the app look broken even though the restart is proceeding
+  // normally. `PreviewPanel` uses this to show an overlay instead.
+  const [isPreviewRestarting, setIsPreviewRestarting] = useState(false);
   const [projectScope, setProjectScope] = useState<string>("frontend");
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -999,11 +1048,18 @@ export default function ProjectView({ projectId }: { projectId: string }) {
 
         fetchProjectScope();
 
-        // The backend restarts `mise run dev` after a successful build.
-        // Signal PreviewPanel to refetch the iframe once Vite is back up.
-        if (data.status === "succeeded") {
-          setPreviewReloadNonce((n) => n + 1);
-        }
+        // Don't touch `previewReloadNonce` here: `build.complete` fires
+        // *before* `restart_deployment_after_opencode_build` tears Vite
+        // down (see run_build.rs: publish_event(BuildComplete) → await
+        // restart). Bumping the nonce now would kick off the iframe
+        // reload against the still-healthy old Vite, then Vite gets
+        // killed mid-load and the iframe renders the proxy's raw
+        // "upstream: error sending request …" 502 body. The reload is
+        // instead triggered by `restart_healthy` below, so the iframe
+        // only refetches once the new dev server is confirmed up.
+        //
+        // We intentionally do NOT clear `isPreviewRestarting` here either
+        // — that's owned by the `deploy.status` handler (see below).
 
         if (data.job_id) {
           scheduleBuildJobRefetches(data.job_id, setJob);
@@ -1027,6 +1083,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         setThinkingSteps([]);
         streamingMsgIdRef.current = null;
         setPreviewStatusDetail(null);
+        setIsPreviewRestarting(false);
       } catch {
         /* ignore */
       }
@@ -1045,6 +1102,30 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           },
         ]);
         setPreviewStatusDetail(data.message);
+        // Overlay + iframe-reload lifecycle.
+        //
+        // - restart_started: Vite is about to be killed. Pin the overlay
+        //   over the iframe so the user never sees the in-flight 502s
+        //   (and especially not the proxy's literal "upstream: …" body
+        //   rendered as plaintext in the iframe).
+        //
+        // - restart_healthy: new Vite is up. NOW trigger the iframe
+        //   reload by bumping `previewReloadNonce`. We keep the overlay
+        //   up through the reload itself; PreviewPanel clears it via
+        //   `onPreviewReady` once the iframe's onLoad fires, so there's
+        //   no flash of a half-loaded document.
+        //
+        // - restart_failed: Vite never came back. Drop the overlay so
+        //   the user isn't stuck staring at a spinner forever; the
+        //   underlying 502 is the honest state and a later build can
+        //   recover.
+        if (data.phase === "restart_started") {
+          setIsPreviewRestarting(true);
+        } else if (data.phase === "restart_healthy") {
+          setPreviewReloadNonce((n) => n + 1);
+        } else if (data.phase === "restart_failed") {
+          setIsPreviewRestarting(false);
+        }
         setIsLoading(true);
       } catch {
         /* ignore */
@@ -1232,6 +1313,8 @@ export default function ProjectView({ projectId }: { projectId: string }) {
             status={job?.status ?? null}
             statusDetail={previewStatusDetail}
             reloadNonce={previewReloadNonce}
+            isRestarting={isPreviewRestarting}
+            onPreviewReady={() => setIsPreviewRestarting(false)}
           />
         </div>
       </div>

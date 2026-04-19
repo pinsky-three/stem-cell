@@ -76,7 +76,11 @@ pub struct MessageResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileDiff {
-    #[serde(default)]
+    // OpenCode has used different key names for the touched file across
+    // versions (`path`, `file`, `filePath`, `file_path`). Accept all of
+    // them so a rename upstream does not silently produce diffs with an
+    // empty `path` (which then lands as junk rows in `artifacts`).
+    #[serde(default, alias = "file", alias = "filePath", alias = "file_path")]
     pub path: String,
     #[serde(default)]
     pub status: String,

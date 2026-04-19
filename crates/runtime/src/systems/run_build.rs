@@ -137,6 +137,88 @@ fn summarize_session_error(data: &serde_json::Value) -> String {
     format!("{name}: {data}")
 }
 
+/// Compact, log-safe summary of a tool invocation's `input` payload.
+///
+/// Why not log the whole `input`? Tools like `write` can carry multi-KB
+/// file contents, `bash` can carry shell snippets with newlines, and
+/// `webfetch` can include long URLs or bodies — dumping them verbatim
+/// into structured logs (a) wrecks readability, (b) balloons log volume,
+/// and (c) has leaked secrets in the past. Instead, we cherry-pick the
+/// fields that actually tell us *what happened on disk*:
+///
+///   - `write` / `edit`    → the target file path
+///   - `bash`              → the command, truncated to 200 chars
+///   - `read` / `glob` / `grep` → the path or pattern
+///   - `webfetch`          → the URL
+///
+/// For anything else we fall back to the JSON object's top-level keys
+/// so at least the shape is visible.
+fn summarize_tool_input(tool: &str, input: &serde_json::Value) -> String {
+    fn trunc(s: &str, max: usize) -> String {
+        let one_line: String = s.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+        if one_line.chars().count() <= max {
+            return one_line;
+        }
+        let cut: String = one_line.chars().take(max).collect();
+        format!("{cut}… ({} chars total)", one_line.chars().count())
+    }
+    fn get_str<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        v.get(key).and_then(|x| x.as_str())
+    }
+
+    match tool {
+        "write" | "edit" | "str_replace" | "str_replace_editor" | "patch" => {
+            if let Some(p) = get_str(input, "filePath")
+                .or_else(|| get_str(input, "file_path"))
+                .or_else(|| get_str(input, "path"))
+            {
+                return format!("file={p}");
+            }
+        }
+        "bash" | "shell" | "run_command" => {
+            if let Some(cmd) = get_str(input, "command").or_else(|| get_str(input, "cmd")) {
+                return format!("cmd={}", trunc(cmd, 200));
+            }
+        }
+        "read" | "read_file" | "cat" => {
+            if let Some(p) = get_str(input, "filePath")
+                .or_else(|| get_str(input, "file_path"))
+                .or_else(|| get_str(input, "path"))
+            {
+                return format!("file={p}");
+            }
+        }
+        "glob" => {
+            if let Some(p) = get_str(input, "pattern") {
+                return format!("pattern={p}");
+            }
+        }
+        "grep" => {
+            let pat = get_str(input, "pattern").unwrap_or("");
+            let path = get_str(input, "path").unwrap_or("");
+            if !pat.is_empty() || !path.is_empty() {
+                return format!("pattern={pat} path={path}");
+            }
+        }
+        "webfetch" | "fetch" => {
+            if let Some(u) = get_str(input, "url") {
+                return format!("url={}", trunc(u, 200));
+            }
+        }
+        _ => {}
+    }
+
+    // Fallback: list the top-level keys so the shape is visible at a glance.
+    match input {
+        serde_json::Value::Object(map) => {
+            let keys: Vec<&str> = map.keys().take(8).map(|k| k.as_str()).collect();
+            format!("keys={keys:?}")
+        }
+        serde_json::Value::Null => String::from("<null>"),
+        _ => trunc(&input.to_string(), 200),
+    }
+}
+
 #[async_trait::async_trait]
 impl RunBuildSystem for super::AppSystems {
     async fn execute(
@@ -597,11 +679,20 @@ impl RunBuildSystem for super::AppSystems {
                                                 .and_then(|s| s.get("input"))
                                                 .cloned()
                                                 .unwrap_or(serde_json::json!({}));
+
+                                            // Build a compact, tool-aware summary of the inputs
+                                            // so logs tell us *what* OpenCode did on disk (which
+                                            // file it wrote, which command it ran) without dumping
+                                            // whole file contents into the structured log.
+                                            let input_summary =
+                                                summarize_tool_input(&tool_name, &args);
+
                                             tracing::info!(
                                                 session_id = %session_id_bg,
                                                 call_id,
                                                 tool = %tool_name,
                                                 status = %status,
+                                                input = %input_summary,
                                                 "OpenCode tool call"
                                             );
                                             publish_event(
@@ -899,30 +990,48 @@ impl RunBuildSystem for super::AppSystems {
         );
 
         // ── Collect diffs as artifacts ─────────────────────────
-        let diffs = match client.session_diff(&session.id).await {
-            Ok(d) => d,
+        // We fetch the raw body too so we can sanity-check the response
+        // shape when `path` comes back empty: that strongly suggests a
+        // key rename on OpenCode's side (e.g. `file` → `filePath`) and
+        // logging the first ~2KB of the payload makes that trivial to
+        // diagnose without reaching for a debugger.
+        let (diffs, diffs_raw) = match client.session_diff_with_raw(&session.id).await {
+            Ok((d, raw)) => (d, raw),
             Err(e) => {
                 tracing::warn!(
                     session_id = %session.id,
                     error = %e,
                     "session_diff request failed — treating as empty diff set"
                 );
-                Vec::new()
+                (Vec::new(), String::new())
             }
         };
-        // Log a sample of paths so we can see what OpenCode actually touched.
         let diff_paths_preview: Vec<&str> = diffs
             .iter()
             .take(40)
             .map(|d| d.path.as_str())
             .collect();
+        let empty_path_count = diffs.iter().filter(|d| d.path.is_empty()).count();
         tracing::info!(
             session_id = %session.id,
             diff_count = diffs.len(),
+            empty_path_count,
             paths = ?diff_paths_preview,
             truncated = diffs.len() > diff_paths_preview.len(),
             "collected OpenCode session diff"
         );
+        if empty_path_count > 0 {
+            let preview: String = diffs_raw.chars().take(2048).collect();
+            tracing::warn!(
+                session_id = %session.id,
+                diff_count = diffs.len(),
+                empty_path_count,
+                raw_preview = %preview,
+                raw_truncated = diffs_raw.len() > preview.len(),
+                "OpenCode returned diffs with empty `path` — logging raw body so \
+                 we can identify the actual field name (expected: path/file/filePath)"
+            );
+        }
 
         // Guard: upstream provider error (e.g. 502 "Network connection lost"
         // from the model backend). OpenCode emits `session.error` and then
@@ -1003,7 +1112,18 @@ impl RunBuildSystem for super::AppSystems {
         }
 
         let mut artifacts_count: i32 = 0;
+        let mut artifacts_skipped_empty: i32 = 0;
         for diff in &diffs {
+            // Defensive: an empty `path` would land as a junk artifact row
+            // with no way for the UI (or `detect_language`) to do anything
+            // useful. This usually means the upstream JSON shape changed
+            // (see the "empty_path_count" warning above) — skip until we
+            // can see the real field name in the diagnostic log.
+            if diff.path.trim().is_empty() {
+                artifacts_skipped_empty += 1;
+                continue;
+            }
+
             let hash = format!("{:x}", fnv_hash(diff.path.as_bytes()));
             let size = (diff.additions + diff.deletions) as i64;
             let lang = detect_language(&diff.path);
@@ -1026,6 +1146,14 @@ impl RunBuildSystem for super::AppSystems {
             .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
 
             artifacts_count += 1;
+        }
+        if artifacts_skipped_empty > 0 {
+            tracing::warn!(
+                session_id = %session.id,
+                artifacts_skipped_empty,
+                artifacts_count,
+                "skipped diffs with empty path — inserted only the ones with a real file_path"
+            );
         }
 
         let duration_ms = started.elapsed().as_millis() as i64;

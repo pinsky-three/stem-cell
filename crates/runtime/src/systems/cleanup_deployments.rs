@@ -62,6 +62,153 @@ impl CleanupDeploymentsSystem for super::AppSystems {
     }
 }
 
+// ── Startup reconciliation ──────────────────────────────────────────────
+
+/// Runs once at boot to reconcile the `deployments` table with reality.
+///
+/// Why this exists: when the stem-cell process exits (crash, `Ctrl+C`,
+/// deploy), its child dev servers die with it, but nothing updates the
+/// DB — rows stay at `active=true, status='running'` pointing at ports
+/// that no longer have anything listening. The proxy then cheerfully
+/// forwards traffic there forever, and the iframe's auto-refresh error
+/// page piles ~1 req/s of 502s into the logs (see the log flood that
+/// motivated this fix).
+///
+/// The sweep TCP-probes each active deployment's port. If the port is
+/// refusing connections, the deployment is marked `stopped` and its
+/// `build_job` is cleared out of any zombie 'running' state. No
+/// processes are killed (they're already dead); no filesystem work;
+/// just DB hygiene so the proxy can return a proper `410 Gone` instead
+/// of hitting a dead port.
+///
+/// Best-effort: any error during the sweep is logged but doesn't fail
+/// startup — a partial sweep is strictly better than no sweep.
+pub async fn sweep_stale_deployments_on_startup(pool: &sqlx::PgPool) {
+    #[derive(sqlx::FromRow)]
+    struct StartupRow {
+        id: uuid::Uuid,
+        build_job_id: uuid::Uuid,
+        port: i32,
+        pid: Option<i32>,
+    }
+
+    let rows: Vec<StartupRow> = match sqlx::query_as::<_, StartupRow>(
+        "SELECT id, build_job_id, port, pid FROM deployments \
+         WHERE active = true AND deleted_at IS NULL \
+           AND status IN ('running', 'starting')",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rs) => rs,
+        Err(e) => {
+            tracing::warn!(error = %e, "startup sweep: query failed — skipping");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        tracing::info!("startup sweep: no active deployments to reconcile");
+        return;
+    }
+
+    let mut alive = 0u32;
+    let mut marked_stopped = 0u32;
+
+    for row in &rows {
+        let port: u16 = match row.port.try_into() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(deployment_id = %row.id, port = row.port, "invalid port — marking stopped");
+                mark_stopped_no_kill(pool, row.id, row.build_job_id).await;
+                marked_stopped += 1;
+                continue;
+            }
+        };
+
+        // Short probe: 500 ms is plenty on localhost and keeps the sweep
+        // from stalling boot if a node is genuinely slow.
+        let probe = tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::net::TcpStream::connect(("127.0.0.1", port)),
+        )
+        .await;
+
+        match probe {
+            Ok(Ok(_stream)) => {
+                alive += 1;
+                tracing::info!(
+                    deployment_id = %row.id,
+                    port,
+                    pid = ?row.pid,
+                    "startup sweep: deployment still alive"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::info!(
+                    deployment_id = %row.id,
+                    port,
+                    pid = ?row.pid,
+                    error = %e,
+                    "startup sweep: port not accepting connections — marking stopped"
+                );
+                mark_stopped_no_kill(pool, row.id, row.build_job_id).await;
+                marked_stopped += 1;
+            }
+            Err(_) => {
+                tracing::info!(
+                    deployment_id = %row.id,
+                    port,
+                    pid = ?row.pid,
+                    "startup sweep: probe timeout — marking stopped"
+                );
+                mark_stopped_no_kill(pool, row.id, row.build_job_id).await;
+                marked_stopped += 1;
+            }
+        }
+    }
+
+    tracing::info!(
+        total = rows.len(),
+        alive,
+        marked_stopped,
+        "startup sweep complete"
+    );
+}
+
+/// DB-only counterpart to `cleanup_one`: assumes the process is already
+/// gone (verified by the caller via TCP probe), so we just flip the rows
+/// to `stopped`/`active=false` and leave the work dir on disk for
+/// potential revival.
+async fn mark_stopped_no_kill(
+    pool: &sqlx::PgPool,
+    deployment_id: uuid::Uuid,
+    build_job_id: uuid::Uuid,
+) {
+    if let Err(e) = sqlx::query(
+        "UPDATE deployments \
+         SET status = 'stopped', active = false, pid = NULL, updated_at = NOW() \
+         WHERE id = $1",
+    )
+    .bind(deployment_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(%deployment_id, error = %e, "startup sweep: update deployment failed");
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE build_jobs SET status = 'stopped', updated_at = NOW() \
+         WHERE id = $1 AND status IN ('running', 'succeeded')",
+    )
+    .bind(build_job_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(%build_job_id, error = %e, "startup sweep: update build_job failed");
+    }
+}
+
 // ── Periodic background loop ────────────────────────────────────────────
 
 static CLEANUP_LOOP: std::sync::OnceLock<()> = std::sync::OnceLock::new();

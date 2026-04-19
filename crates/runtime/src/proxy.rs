@@ -62,7 +62,7 @@ async fn do_proxy(
     };
 
     if !active {
-        return (StatusCode::GONE, "deployment is stopped").into_response();
+        return deployment_stopped_response(req.headers());
     }
 
     let target = format!("http://localhost:{port}/{path}");
@@ -163,16 +163,23 @@ fn upstream_unavailable_response(req_headers: &HeaderMap, err: &str) -> Response
         return (StatusCode::BAD_GATEWAY, format!("upstream: {err}")).into_response();
     }
 
-    // NOTE: keep this tiny — it is served every ~800 ms during a restart
-    // and we'd rather the UX feel snappy than the page look polished.
-    // Tailwind isn't available here (this is raw proxy-served HTML), so
-    // inline styles only.
+    // IMPORTANT: do NOT use `<meta http-equiv="refresh">` here. If Vite
+    // stays down for long enough (crash, server restart leaving an
+    // orphan deployment row pointing at a dead port), an unconditional
+    // refresh turns the iframe into a self-sustaining 502 flood of
+    // ~1 req/s indefinitely. Instead, use JS with a sessionStorage-
+    // backed retry counter and exponential-ish backoff, and after a
+    // handful of failed attempts stop refreshing entirely and offer
+    // the user a manual retry. The backend logs thank us.
+    //
+    // Budget: ~10 attempts over ~60 s, then give up.
+    // Key is scoped to `location.pathname` so each proxied page has
+    // its own counter (navigating away resets the budget).
     let html = r#"<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta http-equiv="refresh" content="2">
     <title>Preview updating…</title>
     <style>
       html, body { height: 100%; margin: 0; }
@@ -187,15 +194,56 @@ fn upstream_unavailable_response(req_headers: &HeaderMap, err: &str) -> Response
         border: 2px solid #3f3f46; border-top-color: #818cf8;
         animation: spin 0.9s linear infinite;
       }
-      p.detail { color: #a1a1aa; font-size: 12px; max-width: 20rem; text-align: center; line-height: 1.5; }
+      p.detail { color: #a1a1aa; font-size: 12px; max-width: 22rem; text-align: center; line-height: 1.5; }
       p.title { font-size: 14px; font-weight: 500; margin: 0; }
+      button.retry {
+        margin-top: 8px; padding: 6px 14px; border-radius: 6px;
+        border: 1px solid #3f3f46; background: #18181b; color: #e5e5e5;
+        font-size: 12px; cursor: pointer;
+      }
+      button.retry:hover { background: #27272a; }
       @keyframes spin { to { transform: rotate(360deg); } }
+      .hidden { display: none; }
     </style>
   </head>
   <body>
-    <div class="spinner" aria-hidden="true"></div>
-    <p class="title">Preview is updating…</p>
-    <p class="detail">The dev server is restarting to apply your latest change. This page will reload automatically.</p>
+    <div id="loading">
+      <div class="spinner" aria-hidden="true"></div>
+      <p class="title">Preview is updating…</p>
+      <p class="detail">The dev server is restarting to apply your latest change. This page will reload automatically.</p>
+    </div>
+    <div id="gaveup" class="hidden">
+      <p class="title">Preview is offline</p>
+      <p class="detail">The dev server isn't responding. It may have crashed, or the environment was cleaned up. Try starting a new build, or click retry.</p>
+      <button class="retry" onclick="try{sessionStorage.removeItem(window.__sc_k);}catch(_){};location.reload();">Retry</button>
+    </div>
+    <script>
+      (function() {
+        var MAX = 10;
+        var BASE_MS = 2000;
+        var k = "sc_preview_retry:" + location.pathname;
+        window.__sc_k = k; // expose for the Retry button
+        var n = 0;
+        try { n = parseInt(sessionStorage.getItem(k) || "0", 10) | 0; } catch (_) {}
+        if (n >= MAX) {
+          document.getElementById("loading").classList.add("hidden");
+          document.getElementById("gaveup").classList.remove("hidden");
+          return;
+        }
+        try { sessionStorage.setItem(k, String(n + 1)); } catch (_) {}
+        // Gentle backoff: 2s, 2s, 3s, 4s, 6s, 9s… capped at 12s.
+        var delay = Math.min(12000, Math.round(BASE_MS * Math.pow(1.5, Math.max(0, n - 1))));
+        setTimeout(function() {
+          try {
+            var u = new URL(location.href);
+            u.searchParams.set("__sc_retry", String(Date.now()));
+            location.replace(u.toString());
+          } catch (_) {
+            location.reload();
+          }
+        }, delay);
+      })();
+    </script>
   </body>
 </html>"#;
 
@@ -207,6 +255,60 @@ fn upstream_unavailable_response(req_headers: &HeaderMap, err: &str) -> Response
         .unwrap_or_else(|_| {
             (StatusCode::BAD_GATEWAY, format!("upstream: {err}")).into_response()
         })
+}
+
+/// 410 Gone page served when the proxy deliberately refuses (deployment
+/// marked `active=false` by the startup sweep or by cleanup).
+///
+/// Unlike `upstream_unavailable_response`, this is a *terminal* state:
+/// the environment isn't coming back without a new spawn. Auto-refresh
+/// would just burn CPU on both ends, so the page sits still and points
+/// the user back to the app. Non-HTML requests still get a short
+/// plaintext body so tooling and fetch-based clients can tell the
+/// difference from a transient 502.
+fn deployment_stopped_response(req_headers: &HeaderMap) -> Response {
+    let accepts_html = req_headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("text/html"))
+        .unwrap_or(false);
+
+    if !accepts_html {
+        return (StatusCode::GONE, "deployment is stopped").into_response();
+    }
+
+    let html = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Preview offline</title>
+    <style>
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 10px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #0a0a0a; color: #e5e5e5;
+      }
+      p.title { font-size: 14px; font-weight: 500; margin: 0; }
+      p.detail { color: #a1a1aa; font-size: 12px; max-width: 22rem; text-align: center; line-height: 1.5; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: #ef4444; }
+    </style>
+  </head>
+  <body>
+    <div class="dot" aria-hidden="true"></div>
+    <p class="title">Preview is offline</p>
+    <p class="detail">This environment has been stopped. Start a new build from the chat to spin up a fresh preview.</p>
+  </body>
+</html>"#;
+
+    Response::builder()
+        .status(StatusCode::GONE)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(Body::from(html))
+        .unwrap_or_else(|_| (StatusCode::GONE, "deployment is stopped").into_response())
 }
 
 /// Rewrite absolute paths in proxied responses so `/_astro/...`, `/favicon.png`,

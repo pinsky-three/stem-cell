@@ -1439,6 +1439,67 @@ async fn create_deployment(
     Ok(deployment_id)
 }
 
+/// After OpenCode writes files that Vite's own file watcher will pick up
+/// (page edits under `frontend/src/**`, no deps/config/env touched), we
+/// don't need to kill and re-launch `mise run dev`. Vite has already
+/// invalidated its module graph from the fs event; the iframe just has
+/// to re-fetch the document so the user sees the new markup.
+///
+/// This function emits a lightweight `deploy.status` event with phase
+/// `soft_reload`; the frontend reacts by bumping the iframe reload
+/// nonce **without** showing the heavy "restarting preview…" overlay.
+/// No processes are touched — worst case is a wasted round-trip.
+///
+/// Subprocess mode only; best-effort. Safe to call even when no
+/// deployment row exists (it just becomes a no-op).
+pub(super) async fn soft_reload_preview_after_opencode_build(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+) {
+    let mode = std::env::var("SPAWN_MODE").unwrap_or_default();
+    if mode != "subprocess" {
+        tracing::debug!(%project_id, %mode, "skip soft reload — not subprocess mode");
+        return;
+    }
+
+    let row = sqlx::query(
+        "SELECT d.build_job_id \
+         FROM deployments d \
+         WHERE d.project_id = $1 AND d.active = true AND d.deleted_at IS NULL \
+           AND d.status = 'running' \
+         ORDER BY d.created_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await;
+
+    let spawn_job_id: uuid::Uuid = match row {
+        Ok(Some(r)) => r.get("build_job_id"),
+        Ok(None) => {
+            tracing::debug!(%project_id, "no active deployment to soft-reload");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(%project_id, error = %e, "soft reload: query failed");
+            return;
+        }
+    };
+
+    tracing::info!(
+        %project_id,
+        %spawn_job_id,
+        "emitting soft_reload (Vite stays alive, iframe just refetches)"
+    );
+
+    publish_deploy_status(
+        project_id,
+        spawn_job_id,
+        "soft_reload",
+        "Applying changes…",
+    )
+    .await;
+}
+
 /// After OpenCode writes files, restart `mise run dev` in the checkout so the preview reloads.
 /// Subprocess mode only; best-effort (never fails the OpenCode build).
 pub(super) async fn restart_deployment_after_opencode_build(

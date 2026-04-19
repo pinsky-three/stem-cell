@@ -72,9 +72,223 @@ fn effective_project_scope(raw: &str) -> &'static str {
     }
 }
 
+/// Preview-restart policy read from `OPENCODE_RESTART_ON_BUILD`.
+///
+/// - `always` → keep pre-2026-04 behavior: kill Vite + re-run `mise run dev`
+///   after every successful build. Safe, but wastes 10–15 s and exposes the
+///   user to 502s and a jarring preview overlay on trivial edits.
+/// - `never`  → never kill Vite. Only emit a soft reload so the iframe
+///   pulls the updated document. Requires the agent to stay inside the
+///   watched tree; risky if a dep/config change needs a restart.
+/// - `auto`   → (default) restart iff the diff touches something Vite's
+///   file watcher can't hot-reload (deps, build config, env); otherwise
+///   soft reload. This is the one that removes the 502 window on typical
+///   Astro page edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RestartPolicy {
+    Always,
+    Never,
+    Auto,
+}
+
+pub(super) fn restart_policy() -> RestartPolicy {
+    match std::env::var("OPENCODE_RESTART_ON_BUILD")
+        .unwrap_or_else(|_| "auto".into())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "always" => RestartPolicy::Always,
+        "never" => RestartPolicy::Never,
+        _ => RestartPolicy::Auto,
+    }
+}
+
+/// True when the set of changed files requires a full dev-server restart
+/// (dep install, new toolchain, config reload) instead of a cheap
+/// iframe-only reload.
+///
+/// The decision is intentionally conservative: when in doubt, restart.
+/// The soft-reload path only triggers for edits the Vite file watcher
+/// already picks up on its own — everything else keeps the old behavior.
+pub(super) fn diffs_require_hard_restart(paths: &[&str], scope_eff: &str) -> bool {
+    for raw in paths {
+        let p = raw.trim_start_matches("./");
+        if p.is_empty() {
+            continue;
+        }
+        let file = p.rsplit('/').next().unwrap_or(p);
+
+        // Dep manifests / lockfiles — package install required.
+        if matches!(
+            file,
+            "package.json" | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock" | "bun.lockb"
+        ) {
+            return true;
+        }
+
+        // Build / TS config — Vite doesn't pick these up on the fly.
+        if file.starts_with("astro.config.")
+            || file.starts_with("vite.config.")
+            || file == "tsconfig.json"
+            || file == "tsconfig.app.json"
+            || file == "tsconfig.node.json"
+            || file == "postcss.config.js"
+            || file == "postcss.config.cjs"
+            || file == "tailwind.config.js"
+            || file == "tailwind.config.cjs"
+            || file == "tailwind.config.ts"
+            || file == ".mise.toml"
+            || file == "mise.toml"
+        {
+            return true;
+        }
+
+        // Env files — process-level, always require a restart.
+        if file == ".env" || file.starts_with(".env.") {
+            return true;
+        }
+
+        // Rust / backend bits are never soft-reloadable from the preview's POV.
+        if matches!(file, "Cargo.toml" | "Cargo.lock") || p.starts_with("crates/") {
+            return true;
+        }
+
+        // Scope-specific: edits outside the preview's watched tree should
+        // trigger a restart. Vite's dev watcher only serves files under
+        // its root.
+        match scope_eff {
+            "frontend" => {
+                if !(p.starts_with("frontend/src/") || p.starts_with("frontend/public/")) {
+                    return true;
+                }
+            }
+            "full" => {
+                // Full scope: the preview can be at repo root or under a
+                // framework folder — we don't know for sure which files
+                // are live-reloadable. Be safe and restart.
+                return true;
+            }
+            _ => return true,
+        }
+    }
+    false
+}
+
+/// Edit-first guidance appended to every default prompt. Encodes the
+/// rules that prevent the recurring "agent invents a new route instead
+/// of editing the homepage" failure mode:
+///
+/// - Explicit homepage mapping for Astro (`src/pages/index.astro`).
+/// - "Prefer editing over creating" heuristic.
+/// - Plan-before-execute nudge with a soft tool budget.
+///
+/// These are intentionally short — the model already respects short,
+/// concrete rules better than long prose, and longer system prompts
+/// eat the context window we need for the real workspace.
+const OPENCODE_BUILD_SYSTEM_EDIT_FIRST: &str = concat!(
+    "\n\nEditing discipline:\n",
+    "- The homepage lives at `frontend/src/pages/index.astro`. If the user says ",
+    "\"landing page\", \"home\", \"homepage\", \"inicio\", \"portada\", or asks to ",
+    "change the main page without naming a route, **edit `index.astro`** — do NOT ",
+    "create a new route file.\n",
+    "- Prefer editing existing files over creating new ones. Only create new files ",
+    "when the user explicitly asks for a new page/component that doesn't exist.\n",
+    "- Before your first `write`/`edit` tool call, skim `frontend/src/pages/` and ",
+    "`frontend/src/components/` so you reuse what's already there.\n",
+    "- Plan first, in 1–3 sentences. Then execute. Do not re-explain the plan ",
+    "between tool calls.\n",
+    "- Keep tool calls focused: aim for ≤ 10 total tool calls per turn; if you ",
+    "need more, stop and ask the user.",
+);
+
+/// Best-effort listing of Astro route files the agent should be aware
+/// of. Called at prompt time to give the system prompt concrete ground
+/// truth about the checkout. Bounded to a small cap so pathological
+/// projects can't blow up the prompt.
+async fn discover_frontend_pages(work_dir: &std::path::Path) -> Vec<String> {
+    const MAX_ROUTES: usize = 30;
+    let pages_root = work_dir.join("frontend").join("src").join("pages");
+    let mut out: Vec<String> = Vec::new();
+
+    async fn walk(
+        dir: std::path::PathBuf,
+        pages_root: &std::path::Path,
+        out: &mut Vec<String>,
+        depth: usize,
+    ) {
+        if depth > 4 || out.len() >= MAX_ROUTES {
+            return;
+        }
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if out.len() >= MAX_ROUTES {
+                return;
+            }
+            let path = entry.path();
+            let Ok(ftype) = entry.file_type().await else {
+                continue;
+            };
+            if ftype.is_dir() {
+                // Skip Astro/Vite internals and node_modules just in case.
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with('.') || name == "node_modules" {
+                        continue;
+                    }
+                }
+                Box::pin(walk(path, pages_root, out, depth + 1)).await;
+            } else if ftype.is_file() {
+                let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                    continue;
+                };
+                if !matches!(ext, "astro" | "md" | "mdx") {
+                    continue;
+                }
+                if let Ok(rel) = path.strip_prefix(pages_root) {
+                    out.push(format!(
+                        "frontend/src/pages/{}",
+                        rel.to_string_lossy().replace('\\', "/")
+                    ));
+                }
+            }
+        }
+    }
+
+    walk(pages_root.clone(), &pages_root, &mut out, 0).await;
+    out.sort();
+    out.dedup();
+    out.truncate(MAX_ROUTES);
+    out
+}
+
+/// Builds the dynamic "what's in this project right now" preamble that
+/// gets appended to the system prompt. Separate from the static rules
+/// so the model sees "here are the files that already exist" *and*
+/// "here are the rules for touching them".
+fn format_project_preamble(pages: &[String]) -> String {
+    if pages.is_empty() {
+        return String::from(
+            "\n\nProject snapshot:\n- `frontend/src/pages/` appears empty or unavailable — \
+             create `index.astro` only if that's truly the case.",
+        );
+    }
+    let list = pages
+        .iter()
+        .map(|p| format!("  - `{p}`"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("\n\nExisting routes in this checkout:\n{list}")
+}
+
 /// If `STEM_CELL_OPENCODE_SYSTEM_PROMPT` is set and non-empty after trim, it replaces the
 /// default; if set to whitespace-only, no system message is sent.
-fn opencode_build_system_prompt(project_scope_raw: &str) -> Option<String> {
+async fn opencode_build_system_prompt(
+    project_scope_raw: &str,
+    work_dir: &std::path::Path,
+) -> Option<String> {
     match std::env::var("STEM_CELL_OPENCODE_SYSTEM_PROMPT") {
         Ok(s) if !s.trim().is_empty() => Some(s),
         Ok(_) => None,
@@ -83,9 +297,38 @@ fn opencode_build_system_prompt(project_scope_raw: &str) -> Option<String> {
                 "full" => OPENCODE_BUILD_SYSTEM_FULL,
                 _ => OPENCODE_BUILD_SYSTEM_FRONTEND,
             };
-            Some(body.to_string())
+            let pages = discover_frontend_pages(work_dir).await;
+            Some(format!(
+                "{body}{edit_first}{preamble}",
+                edit_first = OPENCODE_BUILD_SYSTEM_EDIT_FIRST,
+                preamble = format_project_preamble(&pages),
+            ))
         }
     }
+}
+
+/// Cheap semantic check: does the user prompt sound like a homepage /
+/// landing edit? Used after a build to advise when the agent forgot to
+/// touch `index.astro`. Keep this intentionally loose — a false positive
+/// just surfaces an extra hint message, it doesn't change control flow.
+fn prompt_mentions_homepage(prompt: &str) -> bool {
+    let p = prompt.to_ascii_lowercase();
+    const MARKERS: &[&str] = &[
+        "landing page",
+        "landing",
+        "homepage",
+        "home page",
+        " home ",
+        "main page",
+        "main landing",
+        "inicio",
+        "página principal",
+        "pagina principal",
+        "portada",
+        "página de inicio",
+        "pagina de inicio",
+    ];
+    MARKERS.iter().any(|m| p.contains(m))
 }
 
 /// Result returned by the SSE forwarder task to the main run_build flow.
@@ -930,7 +1173,7 @@ impl RunBuildSystem for super::AppSystems {
         // Model is configured server-side via OPENCODE_CONFIG_CONTENT;
         // the per-request model field uses a different format (object)
         // and is only needed for overrides, so we omit it.
-        let oc_system = opencode_build_system_prompt(project_scope.as_str());
+        let oc_system = opencode_build_system_prompt(project_scope.as_str(), &work_dir).await;
         tracing::info!(
             session_id = %session.id,
             prompt_chars = prompt.len(),
@@ -1244,6 +1487,40 @@ impl RunBuildSystem for super::AppSystems {
         .await
         .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?;
 
+        // Homepage intent sanity-check. When the user clearly asked for a
+        // landing/home edit but the agent never touched `index.astro`
+        // (the most common failure mode: inventing a brand-new route like
+        // `totemiq.astro`), surface a short advisory in chat so the user
+        // knows what happened *and* the next prompt can correct it in
+        // one step. Strictly advisory — we do not fail the build.
+        let touched_index = diffs
+            .iter()
+            .any(|d| d.path == "frontend/src/pages/index.astro");
+        if model != "opencode-repair"
+            && artifacts_count > 0
+            && !touched_index
+            && prompt_mentions_homepage(&prompt)
+        {
+            let advisory = String::from(
+                "\n\n_Hint: your prompt looked like a homepage edit, but I didn't \
+                 modify `frontend/src/pages/index.astro`. If you wanted the visible \
+                 landing page to change, ask me to **edit `index.astro`** directly._",
+            );
+            tracing::info!(
+                %project_id,
+                artifacts_count,
+                "homepage advisory: prompt mentions homepage but index.astro was not touched"
+            );
+            publish_event(
+                project_id,
+                BuildEvent::MessageChunk {
+                    job_id: build_id.to_string(),
+                    text: advisory,
+                },
+            )
+            .await;
+        }
+
         publish_event(
             project_id,
             BuildEvent::BuildComplete {
@@ -1255,23 +1532,64 @@ impl RunBuildSystem for super::AppSystems {
         )
         .await;
 
-        // Only restart the dev server when files actually changed. A 0-artifact
-        // turn (clarifying question, thinking-only reply, webfetch-only research)
-        // doesn't need a Vite restart — and restarting causes the iframe to
-        // show a 502 Bad Gateway for ~5 s for no reason.
-        if model != "opencode-repair" && artifacts_count > 0 {
-            super::spawn_environment::restart_deployment_after_opencode_build(pool, project_id)
-                .await;
-        } else if model == "opencode-repair" {
+        // Preview-refresh decision after a successful build.
+        //
+        // The naive path (always restart) racks up 10–15 s of 502s and an
+        // overlay on every trivial edit, which is painful and covers the
+        // majority of user complaints. Instead we classify the diff: for
+        // edits Vite's file watcher already picks up (content changes
+        // under `frontend/src/`, no deps/config/env) we emit a cheap
+        // "soft_reload" deploy.status event that the frontend uses to
+        // bump the iframe nonce — Vite stays alive, no 502 window. The
+        // hard restart path still runs on dep manifest / build-config /
+        // env changes, and can be forced via `OPENCODE_RESTART_ON_BUILD`.
+        if model == "opencode-repair" {
             tracing::debug!(
                 %project_id,
                 "skip deploy restart after opencode-repair — outer restart loop owns recovery"
             );
-        } else {
+        } else if artifacts_count == 0 {
             tracing::info!(
                 %project_id,
                 "skip deploy restart: build produced 0 artifacts"
             );
+        } else {
+            let policy = restart_policy();
+            let scope_eff = effective_project_scope(project_scope.as_str());
+            let path_strs: Vec<&str> = diffs
+                .iter()
+                .map(|d| d.path.as_str())
+                .filter(|p| !p.trim().is_empty())
+                .collect();
+            let hard_needed = diffs_require_hard_restart(&path_strs, scope_eff);
+
+            let do_hard = match policy {
+                RestartPolicy::Always => true,
+                RestartPolicy::Never => false,
+                RestartPolicy::Auto => hard_needed,
+            };
+
+            tracing::info!(
+                %project_id,
+                ?policy,
+                scope_eff,
+                artifacts_count,
+                hard_needed,
+                do_hard,
+                "preview refresh decision after build"
+            );
+
+            if do_hard {
+                super::spawn_environment::restart_deployment_after_opencode_build(
+                    pool, project_id,
+                )
+                .await;
+            } else {
+                super::spawn_environment::soft_reload_preview_after_opencode_build(
+                    pool, project_id,
+                )
+                .await;
+            }
         }
 
         tracing::info!(

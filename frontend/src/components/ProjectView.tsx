@@ -1119,12 +1119,20 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         //   the user isn't stuck staring at a spinner forever; the
         //   underlying 502 is the honest state and a later build can
         //   recover.
+        //
+        // - soft_reload: page edit that Vite's file watcher already
+        //   picked up. Vite is still alive, so we just bump the nonce
+        //   to refetch the iframe document. Crucially we do NOT flip
+        //   `isPreviewRestarting`; there's no 502 window, and showing
+        //   the heavy overlay for a sub-second reload looks broken.
         if (data.phase === "restart_started") {
           setIsPreviewRestarting(true);
         } else if (data.phase === "restart_healthy") {
           setPreviewReloadNonce((n) => n + 1);
         } else if (data.phase === "restart_failed") {
           setIsPreviewRestarting(false);
+        } else if (data.phase === "soft_reload") {
+          setPreviewReloadNonce((n) => n + 1);
         }
         setIsLoading(true);
       } catch {

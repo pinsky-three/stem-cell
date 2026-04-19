@@ -108,6 +108,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     oc_manager.spawn_reaper();
     tracing::info!("OpenCode process manager initialized");
 
+    // Reconcile zombie deployments from the previous process instance.
+    // When stem-cell restarts, the dev-server children die with it but
+    // the `deployments` table still claims `active=true, status='running'`;
+    // without this sweep the proxy keeps forwarding to dead ports and
+    // the iframe's auto-refresh error page produces a ~1 req/s 502 flood
+    // until something (user, cleanup loop) intervenes. Runs synchronously
+    // so the proxy is consistent with DB state by the time we `listen`.
+    systems::cleanup_deployments::sweep_stale_deployments_on_startup(&pool).await;
+
     // SSE endpoint for streaming build events to the frontend
     let event_routes = events::router();
 

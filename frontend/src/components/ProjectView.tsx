@@ -234,7 +234,7 @@ function LogViewer({ logs }: { logs: string }) {
 
 function ToolChip({ label }: { label: string }) {
   return (
-    <span className="my-1 inline-flex max-w-full items-center gap-1.5 rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 align-middle text-[11px] font-mono text-amber-300/90">
+    <span className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-0.5 text-[11px] font-mono text-amber-300/90">
       <svg
         width="10"
         height="10"
@@ -254,7 +254,7 @@ function ToolChip({ label }: { label: string }) {
 
 function StatusLine({ label }: { label: string }) {
   return (
-    <span className="my-1 inline-flex items-center gap-1.5 align-middle text-[11px] italic text-neutral-500">
+    <span className="inline-flex items-center gap-1.5 text-[11px] italic text-neutral-500">
       <span className="h-1 w-1 shrink-0 rounded-full bg-indigo-400/60" />
       {label}
     </span>
@@ -280,39 +280,45 @@ function TimelineView({
     return -1;
   })();
 
+  // Each timeline item is rendered as its own block row so consecutive
+  // status updates / tool invocations don't collapse into a single
+  // horizontal line. `space-y-1.5` gives a light vertical rhythm;
+  // `whitespace-pre-wrap` on text blocks preserves the assistant's own
+  // line breaks inside a single text segment.
   return (
-    <div className="text-sm leading-relaxed text-neutral-300">
+    <div className="space-y-1.5 text-sm leading-relaxed text-neutral-300">
       {items.map((item, idx) => {
         if (item.kind === "text") {
           const isLastText = idx === lastTextIdx;
           return (
-            <span key={item.id} className="whitespace-pre-wrap">
+            <div key={item.id} className="whitespace-pre-wrap">
               {item.content}
               {streaming && isLastText && (
                 <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-indigo-400/80 align-middle" />
               )}
-            </span>
+            </div>
           );
         }
         if (item.kind === "tool") {
           return (
-            <React.Fragment key={item.id}>
+            <div key={item.id}>
               <ToolChip label={item.label} />
-              {/* trailing space so chips separate when two fire back-to-back */}{" "}
-            </React.Fragment>
+            </div>
           );
         }
         return (
-          <React.Fragment key={item.id}>
-            <StatusLine label={item.label} />{" "}
-          </React.Fragment>
+          <div key={item.id}>
+            <StatusLine label={item.label} />
+          </div>
         );
       })}
       {/* If the last timeline item is a tool/status and we're still
        *  streaming, show a caret on its own line so the bubble still
        *  signals "working…" even before the next text chunk arrives. */}
       {streaming && lastTextIdx !== items.length - 1 && (
-        <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse rounded-sm bg-indigo-400/80 align-middle" />
+        <div>
+          <span className="inline-block h-4 w-1.5 animate-pulse rounded-sm bg-indigo-400/80 align-middle" />
+        </div>
       )}
     </div>
   );

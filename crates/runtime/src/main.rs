@@ -91,26 +91,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Auth routes use AppState — resolve it before merging
     let auth_routes = auth::router().with_state(state.clone());
 
-    // /admin/* is protected: the guard middleware runs *before* the ServeDir
-    // that points at `public/admin`. Anonymous users get redirected to /login
-    // and non-admins get a 403. Admin users fall through to the static files.
+    // /admin/* protection is applied as a GLOBAL middleware below (see
+    // `.layer(admin_guard)`), and pass-through for every non-/admin path.
     //
-    // We use `nest_service` + an outer `.layer()` on purpose. The earlier
-    // shape `nest(..) + inner fallback_service + inner .layer(..)` has an
-    // axum edge case where the layer does not reliably wrap the fallback
-    // service on a nested router, which let unauthenticated requests reach
-    // the static files under /admin/.
-    //
-    // `from_fn_with_state` captures the state directly, so this router does
-    // not add a new state requirement to the outer app.
-    let admin_dir = std::path::Path::new(&serve_dir).join("admin");
-    let admin_serve = ServeDir::new(&admin_dir).append_index_html_on_directories(true);
-    let admin_routes = Router::new()
-        .nest_service("/admin", admin_serve)
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::admin_guard::admin_guard,
-        ));
+    // Why not `nest_service("/admin", ServeDir)`? tower-http `ServeDir` emits
+    // a 301 redirect for directory paths without a trailing slash, using the
+    // path it *received*. Under `nest_service` the prefix is stripped before
+    // the service runs, so `/admin/organizations` → ServeDir sees
+    // `/organizations` → redirects to `/organizations/`, which escapes the
+    // `/admin` prefix and 404s. By letting the root `ServeDir` at `public/`
+    // serve `/admin/*` after the guard accepts, the redirect Location stays
+    // correct (`/admin/organizations/`).
 
     // System endpoints — declarative workflows from systems.yaml
     let system_routes = system_api::router(
@@ -183,12 +174,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(api)
         .merge(system_routes)
         .merge(auth_routes)
-        .merge(admin_routes)
         .merge(health_routes)
         .merge(env_proxy)
         .merge(event_routes)
         .merge(spa_fallback)
         .merge(Scalar::with_url("/api/docs", openapi))
+        // Global guard: enforces admin-only for /admin and /admin/*, and is a
+        // pass-through for every other path. See auth::admin_guard for the
+        // rationale (keeps ServeDir's trailing-slash redirect correct).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::admin_guard::admin_guard,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))

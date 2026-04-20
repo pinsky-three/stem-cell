@@ -1,12 +1,19 @@
 //! Route guard for `/admin/*`.
 //!
-//! Strategy: sit as middleware in front of a `ServeDir` that points at the
-//! generated admin pages. We resolve the session cookie, load the linked
-//! account, and:
+//! Runs as a **global** middleware on the root router. For paths that are not
+//! under `/admin` it's a pass-through; for `/admin` and `/admin/**` it enforces:
 //!
 //! - no session          → 302 to `/login?next={original_path}`
 //! - session, non-admin  → 403 HTML (no redirect loop; the account IS logged in)
-//! - session, admin      → pass through to the next service (ServeDir)
+//! - session, admin      → pass through to the next handler (usually ServeDir)
+//!
+//! We deliberately avoid `nest_service("/admin", ServeDir)` because tower-http
+//! `ServeDir` emits a 301 redirect for directory paths without a trailing
+//! slash, using whatever path it *received*. Under `nest_service` that path is
+//! the prefix-stripped one — so a request to `/admin/organizations` redirects
+//! to `/organizations/`, which escapes the `/admin` prefix and 404s. By
+//! letting the root `ServeDir` at `public/` handle `/admin/*` after the guard
+//! passes, the redirect Location stays correct (`/admin/organizations/`).
 //!
 //! Keeping the enforcement at the server edge means the generated Astro pages
 //! stay oblivious to auth — they're still overwritten by codegen without risk.
@@ -49,6 +56,13 @@ const FORBIDDEN_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
+/// Returns true for URLs that this guard must enforce. Matches exactly
+/// `/admin` and anything beginning with `/admin/` — but NOT `/admins`,
+/// `/administration`, etc.
+fn is_admin_path(path: &str) -> bool {
+    path == "/admin" || path.starts_with("/admin/")
+}
+
 pub async fn admin_guard(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -56,6 +70,10 @@ pub async fn admin_guard(
     req: Request,
     next: Next,
 ) -> Response {
+    if !is_admin_path(uri.path()) {
+        return next.run(req).await;
+    }
+
     let Some(token) = jar.get("session_token").map(|c| c.value().to_string()) else {
         return redirect_to_login(&uri);
     };

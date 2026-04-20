@@ -1,0 +1,16 @@
+[package]
+name = "stem-projects"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-logic filesystem/template/install primitives shared by the stem-cell runtime and stem CLI."
+
+[dependencies]
+tokio = { version = "1", features = ["process", "fs", "macros", "io-util", "time"] }
+tracing = "0.1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

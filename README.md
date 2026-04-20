@@ -227,6 +227,11 @@ cargo run -p stem-cli -- modify "Add a plus_one helper and a unit test for it"
 mise run stem:heal                         # 3 attempts, full pipeline
 cargo run -p stem-cli -- heal --stage test --max-attempts 5
 cargo run -p stem-cli -- heal --dry-run    # diagnose only, don't call OpenCode
+
+# 3. Scaffold a new stem-cell project from the canonical template
+cargo run -p stem-cli -- init my-app
+# ...or pull an existing project (skip --install if you only want the clone)
+cargo run -p stem-cli -- clone https://github.com/pinsky-three/stem-cell-shrank --install
 ```
 
 ### Subcommands
@@ -236,6 +241,8 @@ cargo run -p stem-cli -- heal --dry-run    # diagnose only, don't call OpenCode
 | `stem doctor [--json]` | Diagnoses opencode binary resolution, detected AI providers, repo root, and a stable per-repo project UUID. Exits non-zero when anything required is missing. |
 | `stem modify "<goal>" [--model M] [--timeout-secs N] [--dry-run]` | Spawns a per-repo OpenCode server, sends `<goal>` with a system prompt that pins OpenCode to the constraints in `AGENTS.md`, streams tool calls + text deltas, and prints a diff summary. |
 | `stem heal [--stage check\|lint\|test\|all] [--max-attempts N] [--dry-run]` | Runs `mise run <stage>` (or `cargo` fallbacks). On failure, feeds the tail of the failing output to OpenCode in repair mode. Re-runs after each attempt; stops when green, out of attempts, or the agent produces no diffs. |
+| `stem init <name> [--template URL] [--dir PATH] [--port N] [--skip-install] [--dry-run]` | Scaffolds a new stem-cell project by cloning a template (defaults to `stem-cell-shrank` or `$STEM_DEFAULT_TEMPLATE`), writes a `stem.yaml` manifest, and runs the toolchain install (`mise install`, `.env`/`.mise.toml` port patching, Astro port + Vite override patches). |
+| `stem clone <git-url> [--dir PATH] [--branch B] [--install] [--port N] [--dry-run]` | Thin wrapper around `clone_repo` for pulling an existing stem-cell project. Pass `--install` to additionally run the toolchain bootstrap. |
 
 ### Design notes
 
@@ -252,6 +259,7 @@ cargo run -p stem-cli -- heal --dry-run    # diagnose only, don't call OpenCode
 | `STEM_LOG_FORMAT` | pretty | Set to `json` for JSON-formatted logs |
 | `RUST_LOG` | `stem_cli=info,opencode_client=info,warn` | Tracing filter for the CLI |
 | `OPENCODE_MODEL` | inherited | Default model for `modify` / `heal` (overridable with `--model`) |
+| `STEM_DEFAULT_TEMPLATE` | `https://github.com/pinsky-three/stem-cell-shrank` | Default template URL for `stem init` when `--template` is omitted |
 
 All `OPENCODE_*`, `OPENROUTER_*`, `ANTHROPIC_*`, `OPENAI_*`, and `OLLAMA_*` variables documented above also apply here — the CLI reuses the same `ProcessManager`.
 
@@ -340,7 +348,8 @@ For complex logic, use `mode: "contract"` — this generates a trait + DTOs that
 | `crates/system-model-macro/` | Proc-macro crate (systems YAML → traits, DTOs, executors). |
 | `crates/systems-codegen/` | CLI that materializes impl stubs and contract tests from specs. |
 | `crates/opencode-client/` | OpenCode server client: binary resolution, process lifecycle, SSE stream parsing, session API. |
-| `crates/stem-cli/` | The `stem` CLI binary. Self-modify / self-heal commands powered by `opencode-client`. |
+| `crates/stem-cli/` | The `stem` CLI binary. Self-modify / self-heal commands powered by `opencode-client`, plus `init` / `clone` for project scaffolding. |
+| `crates/stem-projects/` | Pure-logic filesystem/template/install primitives (clone, toolchain bootstrap, Astro/Vite `package.json` patching, `stem.yaml` manifest). Shared by the runtime's `SpawnEnvironment` system and `stem-cli`, so project materialization has exactly one implementation. |
 | `crates/runtime/` | The `stem-cell` binary. `build.rs` generates frontend pages; `main.rs` wires the server + proxy + SSE. |
 | `crates/runtime/src/systems/` | Hand-implemented contract systems (RunBuild, SpawnEnvironment, CleanupDeployments). |
 | `crates/runtime/src/proxy.rs` | Reverse proxy: routes subdomain requests to child environment ports. |

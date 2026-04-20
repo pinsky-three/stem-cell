@@ -127,3 +127,11 @@ run = "cargo run -q -p stem-cli -- doctor"
 [tasks."stem:heal"]
 description = "Run check/lint/test and let OpenCode patch failures"
 run = "cargo run -q -p stem-cli -- heal"
+
+[tasks."stem:init"]
+description = "Scaffold a new stem-cell project (usage: mise run stem:init -- my-app)"
+run = "cargo run -q -p stem-cli -- init"
+
+[tasks."stem:clone"]
+description = "Clone an existing stem-cell project (usage: mise run stem:clone -- <git-url>)"
+run = "cargo run -q -p stem-cli -- clone"

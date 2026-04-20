@@ -2,6 +2,7 @@ use crate::system_api::*;
 use opencode_client::types::BuildEvent;
 use sqlx::Row;
 use std::time::Duration;
+use stem_projects::astro_port_patch_snippet;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::Instrument;
 
@@ -27,33 +28,13 @@ const LOG_FLUSH_INTERVAL: Duration = Duration::from_secs(2);
 /// Max log size stored per job (prevents unbounded growth).
 const MAX_LOG_BYTES: usize = 512 * 1024;
 
-/// Bash snippet that patches `frontend/package.json` so:
-///   1. `astro dev` gets `--host 0.0.0.0 --port {port}` (Astro ignores the PORT env var;
-///      `--host 0.0.0.0` binds all interfaces so both 127.0.0.1 and ::1 reach the server,
-///      and also disables Vite's `allowedHosts` check that blocks proxied hostnames).
-///   2. Vite is pinned to ^7 via npm `overrides` (Astro 6 is incompatible with Vite 8;
-///      the template may pull Vite 8 transitively, causing `Missing field moduleType` 500s).
-/// Inserted into setup scripts after PORT patching, before `npm install` / `mise install`.
-fn astro_port_patch_snippet(port: u16) -> String {
-    format!(
-        "if [ -f frontend/package.json ]; then \
-           if grep -q '\"astro dev\"' frontend/package.json && ! grep -q '\\-\\-port' frontend/package.json; then \
-             _ast=$(mktemp) || exit 1; \
-             sed 's/\"astro dev\"/\"astro dev --host 0.0.0.0 --port {port}\"/' frontend/package.json > \"$_ast\" && mv \"$_ast\" frontend/package.json && \
-             echo '[stem-cell] patched frontend/package.json: astro dev --host 0.0.0.0 --port {port}'; \
-           fi && \
-           if ! grep -q '\"overrides\"' frontend/package.json; then \
-             _vite=$(mktemp) || exit 1; \
-             sed '$ d' frontend/package.json > \"$_vite\" && \
-             printf '  ,\"overrides\": {{\"vite\": \"^7\"}}\\n}}\\n' >> \"$_vite\" && \
-             mv \"$_vite\" frontend/package.json && \
-             echo '[stem-cell] added vite ^7 override to frontend/package.json'; \
-           fi; \
-         fi",
-        port = port,
-    )
-}
-
+/// Bash snippet that patches `frontend/package.json` so Astro dev binds
+/// to `--host 0.0.0.0 --port {port}` and Vite is pinned to ^7.
+///
+/// The implementation now lives in the shared `stem-projects` crate so
+/// the CLI (`stem init`) and the container-mode bootstrap below use the
+/// same logic. We keep this re-export comment so call sites stay
+/// self-documenting.
 /// Characters of combined stdout/stderr tail included in “exited before healthy” errors + `tracing::error`.
 const PREVIEW_EXIT_LOG_TAIL_CHARS: usize = 4096;
 
@@ -616,49 +597,38 @@ async fn run_environment(
 }
 
 /// Clone + toolchain install only (idempotent if checkout already exists).
+///
+/// The actual filesystem + shell pipeline lives in the shared
+/// `stem-projects` crate so the `stem` CLI runs the same bootstrap via
+/// `stem init`. This wrapper only does the job_id/string-error
+/// plumbing the runtime's contract system layer expects.
 async fn run_subprocess_setup(
     repo_url: &str,
     job_id: uuid::Uuid,
     work_dir: &str,
     port: u16,
 ) -> Result<(), String> {
-    // `.mise.toml` often has `[env] _.file = ".env"` then `PORT = "…"`. If `.env` also sets PORT=4200,
-    // mise can expose 4200 to tasks and the preview collides with the host stem-cell (EADDRINUSE).
-    let astro_patch = astro_port_patch_snippet(port);
-    let script = format!(
-        "set -e && \
-         if [ -d \"{dir}/.git\" ]; then echo 'repo already cloned'; else git clone {repo} \"{dir}\"; fi && \
-         cd \"{dir}\" && \
-         MISE=$( command -v mise || echo ~/.local/bin/mise ) && \
-         if [ ! -x \"$MISE\" ]; then \
-           curl -fsSL https://mise.run | bash && MISE=~/.local/bin/mise; \
-         fi && \
-         $MISE trust && \
-         sed 's/^PORT = .*/PORT = \"{port}\"/' .mise.toml > .mise.toml.tmp && mv .mise.toml.tmp .mise.toml && \
-         if [ -f .env ]; then \
-           _sc_env=$(mktemp) || exit 1; \
-           (grep -vE '^[[:space:]]*PORT=' .env || true) > \"$_sc_env\" && \
-           printf 'PORT=%s\\n' '{port}' >> \"$_sc_env\" && \
-           mv \"$_sc_env\" .env; \
-         fi && \
-         {astro_patch} && \
-         if command -v flock >/dev/null 2>&1; then flock /tmp/mise-install.lock $MISE install --yes; else $MISE install --yes; fi",
-        repo = repo_url,
-        dir = work_dir,
-        port = port,
-        astro_patch = astro_patch,
-    );
-
     tracing::info!(%job_id, %repo_url, "subprocess: clone and toolchain install");
-    let status = tokio::process::Command::new("bash")
-        .args(["-c", &script])
-        .env("MISE_YES", "1")
-        .status()
-        .await
-        .map_err(|e| format!("setup script: {e}"))?;
-    if !status.success() {
-        return Err(format!("clone/toolchain setup failed: {status}"));
-    }
+
+    let dest = std::path::PathBuf::from(work_dir);
+    let project = stem_projects::clone_repo(
+        repo_url,
+        &dest,
+        stem_projects::CloneOpts::default(),
+    )
+    .await
+    .map_err(|e| format!("clone_repo: {e}"))?;
+
+    stem_projects::install_toolchain(
+        &project,
+        stem_projects::InstallOpts {
+            port,
+            skip_mise_install: false,
+        },
+    )
+    .await
+    .map_err(|e| format!("install_toolchain: {e}"))?;
+
     Ok(())
 }
 
@@ -843,6 +813,12 @@ async fn run_in_container(
 
     // Explicit `echo` + `git --progress`: Docker/apt often buffer pipe output for long stretches;
     // newline-terminated milestones always reach the host log stream.
+    //
+    // TODO(phase1.5): container bootstrap still inlines its own `git clone`
+    // and `mise install` steps. Subprocess mode has already been moved to
+    // `stem_projects::{clone_repo, install_toolchain}`. Folding container
+    // mode in requires piping the crate's logic through `bash -c` inside
+    // the container; track as a follow-up to keep phase 1 reviewable.
     let astro_patch = astro_port_patch_snippet(port);
     let script = format!(
         "set -e && export DEBIAN_FRONTEND=noninteractive && \

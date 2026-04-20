@@ -6,8 +6,10 @@
 mod agent;
 mod checks;
 mod cli;
+mod clone_cmd;
 mod doctor;
 mod heal;
+mod init;
 mod modify;
 mod repo;
 
@@ -26,6 +28,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Doctor(args) => doctor::run(args).await,
         Command::Modify(args) => modify::run(args).await,
         Command::Heal(args) => heal::run(args).await,
+        Command::Init(args) => init::run(args).await,
+        Command::Clone(args) => clone_cmd::run(args).await,
     }
 }
 

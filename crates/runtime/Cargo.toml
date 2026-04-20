@@ -7,6 +7,7 @@ edition = "2024"
 resource-model-macro = { path = "../../crates/resource-model-macro" }
 system-model-macro = { path = "../../crates/system-model-macro" }
 opencode-client = { path = "../../crates/opencode-client" }
+stem-projects = { path = "../../crates/stem-projects" }
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
     "tls-rustls",

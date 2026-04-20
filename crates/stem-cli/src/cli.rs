@@ -2,6 +2,7 @@
 //! topic modules stay independent of the parser.
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -25,6 +26,12 @@ pub enum Command {
 
     /// Run checks (check / lint / test) and ask OpenCode to fix any failures.
     Heal(HealArgs),
+
+    /// Scaffold a new stem-cell project from a template (defaults to `stem-cell-shrank`).
+    Init(InitArgs),
+
+    /// Clone an existing stem-cell project from a git URL.
+    Clone(CloneArgs),
 }
 
 #[derive(Debug, Args)]
@@ -69,6 +76,60 @@ impl HealStage {
             HealStage::All => &["check", "lint", "test"],
         }
     }
+}
+
+#[derive(Debug, Args)]
+pub struct InitArgs {
+    /// Project name. Becomes the scaffold directory name when `--dir` is omitted.
+    pub name: String,
+
+    /// Template URL (or built-in name). Defaults to `$STEM_DEFAULT_TEMPLATE` or
+    /// the canonical `stem-cell-shrank` seed.
+    #[arg(long, env = "STEM_DEFAULT_TEMPLATE")]
+    pub template: Option<String>,
+
+    /// Parent directory for the scaffold. Defaults to `./<name>`.
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+
+    /// Skip the `mise install --yes` step (useful when offline or inside CI).
+    #[arg(long)]
+    pub skip_install: bool,
+
+    /// Port to patch into `.env` / `.mise.toml` / Astro's `package.json`.
+    #[arg(long, default_value_t = 4200)]
+    pub port: u16,
+
+    /// Print what would happen and exit.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CloneArgs {
+    /// Git URL (HTTPS or SSH) to clone.
+    pub git_url: String,
+
+    /// Destination directory. Defaults to a directory named after the last
+    /// path segment of `git_url`.
+    #[arg(long)]
+    pub dir: Option<PathBuf>,
+
+    /// Optional single branch to check out.
+    #[arg(long)]
+    pub branch: Option<String>,
+
+    /// After cloning, run the toolchain install (`mise install`, etc.).
+    #[arg(long)]
+    pub install: bool,
+
+    /// Port to use when `--install` patches `.env` / `.mise.toml` / Astro.
+    #[arg(long, default_value_t = 4200)]
+    pub port: u16,
+
+    /// Print what would happen and exit.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]

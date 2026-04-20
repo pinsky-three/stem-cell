@@ -170,6 +170,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }),
     );
 
+    // ORDER MATTERS: axum's `Router::layer` only wraps routes (and the
+    // fallback) that were added BEFORE the layer call. So the fallback
+    // service must be registered first — otherwise `/admin` and `/admin/`,
+    // which are served by the ServeDir fallback, bypass `admin_guard`
+    // entirely.
     let app = Router::new()
         .merge(api)
         .merge(system_routes)
@@ -179,6 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(event_routes)
         .merge(spa_fallback)
         .merge(Scalar::with_url("/api/docs", openapi))
+        .fallback_service(ServeDir::new(&serve_dir))
         // Global guard: enforces admin-only for /admin and /admin/*, and is a
         // pass-through for every other path. See auth::admin_guard for the
         // rationale (keeps ServeDir's trailing-slash redirect correct).
@@ -189,8 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
-        .layer(PropagateRequestIdLayer::x_request_id())
-        .fallback_service(ServeDir::new(&serve_dir));
+        .layer(PropagateRequestIdLayer::x_request_id());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;

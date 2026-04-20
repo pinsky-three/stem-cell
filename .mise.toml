@@ -111,3 +111,19 @@ run = "opencode serve --port 14000"
 [tasks."opencode:health"]
 description = "Check if an OpenCode server is responding"
 run = "curl -sf http://127.0.0.1:14000/global/health && echo ' OK' || echo 'NOT REACHABLE'"
+
+# ── stem CLI ──────────────────────────────────────────────────
+# Thin ergonomic wrappers around the stem-cli binary. Run `stem --help`
+# for full options; these tasks exist so contributors have a one-liner.
+
+[tasks.stem]
+description = "Run the stem CLI (pass subcommand + args)"
+run = "cargo run -q -p stem-cli --"
+
+[tasks."stem:doctor"]
+description = "Diagnose stem CLI environment (opencode bin, providers, etc.)"
+run = "cargo run -q -p stem-cli -- doctor"
+
+[tasks."stem:heal"]
+description = "Run check/lint/test and let OpenCode patch failures"
+run = "cargo run -q -p stem-cli -- heal"

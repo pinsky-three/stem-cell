@@ -6,4 +6,5 @@ members = [
     "crates/systems-codegen",
     "crates/opencode-client",
     "crates/runtime",
+    "crates/stem-cli",
 ]

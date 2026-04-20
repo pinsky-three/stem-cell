@@ -34,12 +34,43 @@ pub enum Part {
     Text { text: String },
 }
 
+/// Per-request model reference. OpenCode's `/session/:id/message` and
+/// `/session/:id/prompt_async` endpoints expect the `model` field to be
+/// an object `{ providerID, modelID }` — **not** a string. Passing a
+/// plain string yields HTTP 400 (`invalid_type: expected object`).
+///
+/// Use `ModelRef::parse("openrouter/minimax/minimax-m2.5")` to split on
+/// the first `/`: the prefix becomes `providerID`, the remainder is the
+/// `modelID` (which may itself contain `/`, e.g. `minimax/minimax-m2.5`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelRef {
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    #[serde(rename = "modelID")]
+    pub model_id: String,
+}
+
+impl ModelRef {
+    /// Parses a `provider/model...` string. Returns `None` when the
+    /// input has no `/` separator (OpenCode requires both halves).
+    pub fn parse(s: &str) -> Option<Self> {
+        let (provider, model) = s.split_once('/')?;
+        if provider.is_empty() || model.is_empty() {
+            return None;
+        }
+        Some(Self {
+            provider_id: provider.to_string(),
+            model_id: model.to_string(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendMessageRequest {
     pub parts: Vec<Part>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub model: Option<ModelRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     #[serde(rename = "messageID", skip_serializing_if = "Option::is_none")]
@@ -215,6 +246,48 @@ impl OpenCodeEvent {
             self,
             Self::MessageCompleted { .. } | Self::SessionIdle { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod model_ref_tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_provider_model() {
+        let m = ModelRef::parse("anthropic/claude-3-5-sonnet").expect("ok");
+        assert_eq!(m.provider_id, "anthropic");
+        assert_eq!(m.model_id, "claude-3-5-sonnet");
+    }
+
+    #[test]
+    fn parses_nested_model_id_preserving_slashes() {
+        // openrouter routes models as `<owner>/<model>` inside modelID.
+        let m = ModelRef::parse("openrouter/minimax/minimax-m2.5").expect("ok");
+        assert_eq!(m.provider_id, "openrouter");
+        assert_eq!(m.model_id, "minimax/minimax-m2.5");
+    }
+
+    #[test]
+    fn rejects_string_without_slash() {
+        assert!(ModelRef::parse("just-a-name").is_none());
+    }
+
+    #[test]
+    fn rejects_empty_halves() {
+        assert!(ModelRef::parse("/model").is_none());
+        assert!(ModelRef::parse("provider/").is_none());
+    }
+
+    #[test]
+    fn serializes_with_camelcase_id_suffix() {
+        let m = ModelRef {
+            provider_id: "openrouter".into(),
+            model_id: "minimax/minimax-m2.5".into(),
+        };
+        let json = serde_json::to_string(&m).expect("ser");
+        assert!(json.contains(r#""providerID":"openrouter""#));
+        assert!(json.contains(r#""modelID":"minimax/minimax-m2.5""#));
     }
 }
 

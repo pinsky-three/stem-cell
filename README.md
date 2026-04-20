@@ -212,6 +212,49 @@ mise run opencode:serve     # start an OpenCode server on port 14000 (dev/debug)
 mise run opencode:health    # check if an OpenCode server is responding
 ```
 
+## The `stem` CLI (self-modify & self-heal)
+
+The `stem-cli` crate ships a binary (`stem`) that turns this repo into its own test subject: it points the already-battle-tested `opencode-client` at the current checkout so you can drive self-modification and self-healing from the terminal.
+
+```bash
+# 0. (optional) verify your environment is wired up
+mise run stem:doctor          # or: cargo run -p stem-cli -- doctor
+
+# 1. Free-form self-modification
+cargo run -p stem-cli -- modify "Add a plus_one helper and a unit test for it"
+
+# 2. Self-healing: run check → lint → test, patch failures until green
+mise run stem:heal                         # 3 attempts, full pipeline
+cargo run -p stem-cli -- heal --stage test --max-attempts 5
+cargo run -p stem-cli -- heal --dry-run    # diagnose only, don't call OpenCode
+```
+
+### Subcommands
+
+| Command | Purpose |
+|---|---|
+| `stem doctor [--json]` | Diagnoses opencode binary resolution, detected AI providers, repo root, and a stable per-repo project UUID. Exits non-zero when anything required is missing. |
+| `stem modify "<goal>" [--model M] [--timeout-secs N] [--dry-run]` | Spawns a per-repo OpenCode server, sends `<goal>` with a system prompt that pins OpenCode to the constraints in `AGENTS.md`, streams tool calls + text deltas, and prints a diff summary. |
+| `stem heal [--stage check\|lint\|test\|all] [--max-attempts N] [--dry-run]` | Runs `mise run <stage>` (or `cargo` fallbacks). On failure, feeds the tail of the failing output to OpenCode in repair mode. Re-runs after each attempt; stops when green, out of attempts, or the agent produces no diffs. |
+
+### Design notes
+
+- The CLI reuses `opencode-client::ProcessManager` so lifecycle, port allocation, env-var forwarding, and inline-config generation stay in one place.
+- A deterministic UUIDv5 is derived from the canonical repo path; if we ever daemonize `stem`, the same project_id keeps sessions warm across invocations.
+- Observability: structured logs via `tracing-subscriber`. Set `STEM_LOG_FORMAT=json` for JSON logs, `RUST_LOG=stem_cli=debug` for verbose traces.
+- Non-destructive defaults: `heal --dry-run` prints the failing tail without touching OpenCode; `modify --dry-run` shows what would be sent.
+- Safety rails: the repair prompt explicitly forbids `#[allow]`-ing errors, `#[ignore]`-ing tests, and editing generated/framework code.
+
+### Environment variables (CLI-specific)
+
+| Variable | Default | Description |
+|---|---|---|
+| `STEM_LOG_FORMAT` | pretty | Set to `json` for JSON-formatted logs |
+| `RUST_LOG` | `stem_cli=info,opencode_client=info,warn` | Tracing filter for the CLI |
+| `OPENCODE_MODEL` | inherited | Default model for `modify` / `heal` (overridable with `--model`) |
+
+All `OPENCODE_*`, `OPENROUTER_*`, `ANTHROPIC_*`, `OPENAI_*`, and `OLLAMA_*` variables documented above also apply here — the CLI reuses the same `ProcessManager`.
+
 ## Docker
 
 ```bash
@@ -297,6 +340,7 @@ For complex logic, use `mode: "contract"` — this generates a trait + DTOs that
 | `crates/system-model-macro/` | Proc-macro crate (systems YAML → traits, DTOs, executors). |
 | `crates/systems-codegen/` | CLI that materializes impl stubs and contract tests from specs. |
 | `crates/opencode-client/` | OpenCode server client: binary resolution, process lifecycle, SSE stream parsing, session API. |
+| `crates/stem-cli/` | The `stem` CLI binary. Self-modify / self-heal commands powered by `opencode-client`. |
 | `crates/runtime/` | The `stem-cell` binary. `build.rs` generates frontend pages; `main.rs` wires the server + proxy + SSE. |
 | `crates/runtime/src/systems/` | Hand-implemented contract systems (RunBuild, SpawnEnvironment, CleanupDeployments). |
 | `crates/runtime/src/proxy.rs` | Reverse proxy: routes subdomain requests to child environment ports. |

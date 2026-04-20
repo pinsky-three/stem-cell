@@ -1,0 +1,23 @@
+[package]
+name = "stem-cli"
+version = "0.1.0"
+edition = "2024"
+description = "CLI for the stem-cell ecosystem: self-modify, self-heal, and doctor commands powered by OpenCode."
+
+[[bin]]
+name = "stem"
+path = "src/main.rs"
+
+[dependencies]
+opencode-client = { path = "../opencode-client" }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+dotenvy = "0.15"

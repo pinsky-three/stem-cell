@@ -131,7 +131,7 @@ impl OpenCodeClient {
     ) -> Result<MessageResponse> {
         let body = SendMessageRequest {
             parts,
-            model: model.map(|s| s.to_string()),
+            model: parse_model_ref(model),
             agent: None,
             message_id: None,
             system: None,
@@ -157,7 +157,7 @@ impl OpenCodeClient {
     ) -> Result<()> {
         let body = SendMessageRequest {
             parts,
-            model: model.map(|s| s.to_string()),
+            model: parse_model_ref(model),
             agent: None,
             message_id: None,
             system: system.map(|s| s.to_string()),
@@ -230,6 +230,24 @@ impl OpenCodeClient {
         let body = resp.text().await?;
         let diffs: Vec<FileDiff> = serde_json::from_str(&body).map_err(Error::Json)?;
         Ok((diffs, body))
+    }
+}
+
+/// Converts a `provider/model...` string into the `ModelRef` object shape
+/// OpenCode's API expects. Malformed inputs (no `/`, empty halves) are
+/// dropped with a warning — the server-side default model then applies,
+/// which is safer than hard-failing the whole request.
+fn parse_model_ref(model: Option<&str>) -> Option<ModelRef> {
+    let raw = model?;
+    match ModelRef::parse(raw) {
+        Some(m) => Some(m),
+        None => {
+            tracing::warn!(
+                model = %raw,
+                "ignoring malformed model override; expected `provider/model` (falling back to server default)"
+            );
+            None
+        }
     }
 }
 

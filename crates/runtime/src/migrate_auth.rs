@@ -47,6 +47,18 @@ pub async fn migrate_auth(pool: &PgPool) -> Result<(), sqlx::Error> {
             expires_at  TIMESTAMPTZ NOT NULL,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         );
+
+        -- RBAC: every session-bearing account carries a single role string.
+        -- 'user' is the default; 'admin' gates /admin/* routes.
+        -- Column is added idempotently so existing DBs keep working.
+        ALTER TABLE accounts
+            ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user';
+
+        -- Capture the provider's display handle (e.g. GitHub login) so we can
+        -- authorize by username without a fresh API call on every request and
+        -- render it in audit logs.
+        ALTER TABLE oauth_links
+            ADD COLUMN IF NOT EXISTS username TEXT;
         "#,
     )
     .execute(pool)

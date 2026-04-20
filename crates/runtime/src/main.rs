@@ -89,7 +89,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(pool.clone());
 
     // Auth routes use AppState — resolve it before merging
-    let auth_routes = auth::router().with_state(state);
+    let auth_routes = auth::router().with_state(state.clone());
+
+    // /admin/* is protected: the guard middleware runs *before* the ServeDir
+    // that points at `public/admin`. Anonymous users get redirected to /login
+    // and non-admins get a 403. Admin users fall through to the static files.
+    //
+    // We use `nest_service` + an outer `.layer()` on purpose. The earlier
+    // shape `nest(..) + inner fallback_service + inner .layer(..)` has an
+    // axum edge case where the layer does not reliably wrap the fallback
+    // service on a nested router, which let unauthenticated requests reach
+    // the static files under /admin/.
+    //
+    // `from_fn_with_state` captures the state directly, so this router does
+    // not add a new state requirement to the outer app.
+    let admin_dir = std::path::Path::new(&serve_dir).join("admin");
+    let admin_serve = ServeDir::new(&admin_dir).append_index_html_on_directories(true);
+    let admin_routes = Router::new()
+        .nest_service("/admin", admin_serve)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::admin_guard::admin_guard,
+        ));
 
     // System endpoints — declarative workflows from systems.yaml
     let system_routes = system_api::router(
@@ -162,6 +183,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(api)
         .merge(system_routes)
         .merge(auth_routes)
+        .merge(admin_routes)
         .merge(health_routes)
         .merge(env_proxy)
         .merge(event_routes)

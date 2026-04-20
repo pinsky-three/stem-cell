@@ -72,6 +72,22 @@ pub async fn update_password_hash(
     Ok(())
 }
 
+/// Promote (or demote) an account to a role. No-ops if the role already matches.
+pub async fn set_account_role(
+    pool: &PgPool,
+    account_id: Uuid,
+    role: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE accounts SET role = $1, updated_at = now() WHERE id = $2 AND role IS DISTINCT FROM $1",
+    )
+    .bind(role)
+    .bind(account_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // ── Sessions ────────────────────────────────────────────────────────────
 
 pub async fn create_session(
@@ -128,20 +144,23 @@ pub async fn upsert_oauth_link(
     account_id: Uuid,
     provider: &str,
     provider_user_id: &str,
+    username: Option<&str>,
     access_token: Option<&str>,
     refresh_token: Option<&str>,
 ) -> Result<OAuthLink, sqlx::Error> {
     sqlx::query_as::<_, OAuthLink>(
-        r#"INSERT INTO oauth_links (account_id, provider, provider_user_id, access_token, refresh_token)
-           VALUES ($1, $2, $3, $4, $5)
+        r#"INSERT INTO oauth_links (account_id, provider, provider_user_id, username, access_token, refresh_token)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (provider, provider_user_id)
-           DO UPDATE SET access_token = EXCLUDED.access_token,
+           DO UPDATE SET username      = COALESCE(EXCLUDED.username, oauth_links.username),
+                         access_token  = EXCLUDED.access_token,
                          refresh_token = COALESCE(EXCLUDED.refresh_token, oauth_links.refresh_token)
            RETURNING *"#,
     )
     .bind(account_id)
     .bind(provider)
     .bind(provider_user_id)
+    .bind(username)
     .bind(access_token)
     .bind(refresh_token)
     .fetch_one(pool)

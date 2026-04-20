@@ -9,8 +9,15 @@ pub struct Account {
     #[serde(skip_serializing)]
     pub password_hash: Option<String>,
     pub email_verified: bool,
+    pub role: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Account {
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +53,7 @@ pub struct AccountPublic {
     pub id: Uuid,
     pub email: String,
     pub email_verified: bool,
+    pub role: String,
 }
 
 impl From<Account> for AccountPublic {
@@ -54,6 +62,7 @@ impl From<Account> for AccountPublic {
             id: a.id,
             email: a.email,
             email_verified: a.email_verified,
+            role: a.role,
         }
     }
 }
@@ -64,6 +73,7 @@ pub struct OAuthLink {
     pub account_id: Uuid,
     pub provider: String,
     pub provider_user_id: String,
+    pub username: Option<String>,
     pub access_token: Option<String>,
     pub refresh_token: Option<String>,
     pub created_at: DateTime<Utc>,

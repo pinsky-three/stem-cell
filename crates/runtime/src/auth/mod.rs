@@ -1,3 +1,4 @@
+pub mod admin_guard;
 pub mod config;
 pub mod middleware;
 pub mod models;

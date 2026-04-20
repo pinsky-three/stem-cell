@@ -5,6 +5,19 @@ pub struct AuthConfig {
     pub session_ttl_hours: i64,
     pub github: Option<OAuthProviderConfig>,
     pub google: Option<OAuthProviderConfig>,
+    /// GitHub logins that are auto-promoted to `role = 'admin'` on OAuth
+    /// callback. Sourced from `ADMIN_GITHUB_USERNAMES` (comma-separated).
+    /// Matched case-insensitively. Kept here rather than hard-coded so the
+    /// bootstrap is reversible without redeploys.
+    pub admin_github_usernames: Vec<String>,
+}
+
+impl AuthConfig {
+    pub fn is_admin_github_user(&self, login: &str) -> bool {
+        self.admin_github_usernames
+            .iter()
+            .any(|u| u.eq_ignore_ascii_case(login))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -59,11 +72,19 @@ impl AuthConfig {
             _ => None,
         };
 
+        let admin_github_usernames = std::env::var("ADMIN_GITHUB_USERNAMES")
+            .unwrap_or_else(|_| "bregydoc".to_string())
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         Self {
             app_url,
             session_ttl_hours,
             github,
             google,
+            admin_github_usernames,
         }
     }
 }

@@ -170,6 +170,7 @@ pub async fn oauth_callback(
         account.id,
         &provider,
         &user_info.provider_user_id,
+        user_info.username.as_deref(),
         Some(&access_token),
         token_response
             .refresh_token()
@@ -177,6 +178,31 @@ pub async fn oauth_callback(
     )
     .await
     .map_err(|e| AuthError::Internal(e.to_string()))?;
+
+    // Bootstrap: promote the account to `admin` if this OAuth identity matches
+    // the ADMIN_GITHUB_USERNAMES allow-list. Runs on every login so the role
+    // stays in sync if the list changes and a previously-linked user comes back.
+    if let Some(login) = user_info
+        .username
+        .as_deref()
+        .filter(|_| provider == "github")
+    {
+        let desired_role = if state.auth_config.is_admin_github_user(login) {
+            "admin"
+        } else {
+            "user"
+        };
+        if desired_role == "admin" && !account.is_admin() {
+            tracing::info!(
+                account_id = %account.id,
+                github_login = %login,
+                "promoting account to admin via ADMIN_GITHUB_USERNAMES"
+            );
+        }
+        repository::set_account_role(&state.pool, account.id, desired_role)
+            .await
+            .map_err(|e| AuthError::Internal(e.to_string()))?;
+    }
 
     let session =
         repository::create_session(&state.pool, account.id, state.auth_config.session_ttl_hours)
@@ -196,6 +222,9 @@ pub async fn oauth_callback(
 struct OAuthUserInfo {
     email: String,
     provider_user_id: String,
+    /// Provider's public handle (e.g. GitHub `login`). None for providers that
+    /// don't expose one (e.g. Google returns email only).
+    username: Option<String>,
 }
 
 async fn fetch_user_info(
@@ -228,9 +257,12 @@ async fn fetch_user_info(
                 fetch_github_primary_email(access_token).await?
             };
 
+            let username = json["login"].as_str().map(|s| s.to_string());
+
             Ok(OAuthUserInfo {
                 email,
                 provider_user_id: id,
+                username,
             })
         }
         "google" => {
@@ -246,6 +278,7 @@ async fn fetch_user_info(
             Ok(OAuthUserInfo {
                 email,
                 provider_user_id: id,
+                username: None,
             })
         }
         _ => Err(format!("unsupported provider: {provider}").into()),

@@ -101,6 +101,23 @@ The `opencode-client` crate manages the lifecycle of [OpenCode](https://opencode
 
 Configuration is auto-generated from whichever AI API key is set (`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `OPENAI_API_KEY`). See **Environment variables** below for all knobs.
 
+### Local models via Ollama
+
+For privacy-first / on-prem deployments (e.g. the Mac mini M-series edge), point OpenCode at a local [Ollama](https://ollama.com) server instead of a hosted API. No API key is required.
+
+```bash
+# 1. Pull the models you want to expose
+ollama pull llama3.2
+ollama pull qwen2.5-coder:7b
+
+# 2. In .env, declare them (comma-separated) and pick a default
+OLLAMA_MODELS=llama3.2,qwen2.5-coder:7b
+OLLAMA_BASE_URL=http://localhost:11434/v1   # optional, this is the default
+OPENCODE_MODEL=ollama/qwen2.5-coder:7b
+```
+
+Under the hood the process manager emits an `@ai-sdk/openai-compatible` provider stanza into `OPENCODE_CONFIG_CONTENT`, so the same codegen pipeline works against a local runtime. Ollama can coexist with hosted providers — the first one matched by `OPENCODE_MODEL` wins.
+
 ## Prerequisites
 
 - [mise](https://mise.jdx.dev/) (installs Rust 1.94+, Node 22, and OpenCode automatically)
@@ -166,7 +183,9 @@ Then open:
 | `OPENROUTER_API_KEY` | no | — | OpenRouter API key (auto-generates OpenCode config) |
 | `ANTHROPIC_API_KEY` | no | — | Anthropic API key (alternative to OpenRouter) |
 | `OPENAI_API_KEY` | no | — | OpenAI API key (alternative to OpenRouter) |
-| `OPENCODE_MODEL` | no | `openrouter/deepseek/deepseek-v3.2` | Model identifier (provider-prefixed) |
+| `OLLAMA_MODELS` | no | — | Comma-separated Ollama model tags (e.g. `llama3.2,qwen2.5-coder:7b`). Enables the local Ollama provider when set. |
+| `OLLAMA_BASE_URL` | no | `http://localhost:11434/v1` | Ollama server's OpenAI-compatible endpoint |
+| `OPENCODE_MODEL` | no | `openrouter/deepseek/deepseek-v3.2` | Model identifier (provider-prefixed). Use `ollama/<tag>` for local. |
 | `OPENCODE_CONFIG_CONTENT` | no | — | Override auto-generated OpenCode config with raw JSON |
 | **Spawn / preview** | | | |
 | `SPAWN_MODE` | no | `subprocess` | `subprocess` or `container` — how child envs are created |

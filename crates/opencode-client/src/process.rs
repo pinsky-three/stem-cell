@@ -26,6 +26,11 @@ const FORWARDED_ENV_VARS: &[&str] = &[
     "MISTRAL_API_KEY",
     "XAI_API_KEY",
     "DEEPSEEK_API_KEY",
+    // Ollama (local) — no API key required, but we still forward a
+    // placeholder if present for users fronting Ollama behind an auth proxy.
+    "OLLAMA_BASE_URL",
+    "OLLAMA_MODELS",
+    "OLLAMA_API_KEY",
     "OPENCODE_MODEL",
     "OPENCODE_PROVIDER",
     "OPENCODE_CONFIG",
@@ -49,8 +54,47 @@ const PROVIDER_KEY_MAP: &[(&str, &str)] = &[
     ("deepseek", "DEEPSEEK_API_KEY"),
 ];
 
+/// Default base URL for a local Ollama server (OpenAI-compatible endpoint).
+const OLLAMA_DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
+
+/// Builds the Ollama provider stanza (OpenAI-compatible shape) when
+/// `OLLAMA_MODELS` is set. `OLLAMA_MODELS` is a comma-separated list of
+/// Ollama model tags (e.g. `llama3.2,qwen2.5-coder:7b`). Returns `None`
+/// when the user hasn't opted in.
+///
+/// We use `@ai-sdk/openai-compatible` because it's already bundled with
+/// OpenCode and works against Ollama's `/v1` shim without any extra
+/// npm install at runtime.
+fn build_ollama_provider() -> Option<String> {
+    let raw_models = std::env::var("OLLAMA_MODELS").ok()?;
+    let models: Vec<&str> = raw_models
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    if models.is_empty() {
+        return None;
+    }
+
+    let base_url = std::env::var("OLLAMA_BASE_URL")
+        .unwrap_or_else(|_| OLLAMA_DEFAULT_BASE_URL.to_string());
+
+    let models_json = models
+        .iter()
+        .map(|m| format!(r#""{m}": {{}}"#))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Ollama typically needs no auth, but we pass a dummy `apiKey` because
+    // some openai-compatible clients reject requests without one.
+    Some(format!(
+        r#""ollama": {{ "npm": "@ai-sdk/openai-compatible", "name": "Ollama (local)", "options": {{ "baseURL": "{base_url}", "apiKey": "ollama" }}, "models": {{ {models_json} }} }}"#,
+    ))
+}
+
 /// Builds an inline JSON config for OpenCode from environment variables.
-/// Returns `None` if no provider API keys are detected.
+/// Returns `None` if no provider API keys (or local Ollama models) are
+/// detected.
 fn build_inline_config(pm_config: &ProcessManagerConfig) -> Option<String> {
     let mut providers = Vec::new();
 
@@ -62,6 +106,10 @@ fn build_inline_config(pm_config: &ProcessManagerConfig) -> Option<String> {
                 r#""{provider_id}": {{ "options": {{ "apiKey": "{{env:{env_key}}}" }} }}"#,
             ));
         }
+    }
+
+    if let Some(ollama) = build_ollama_provider() {
+        providers.push(ollama);
     }
 
     if providers.is_empty() {
@@ -344,4 +392,104 @@ impl ProcessManager {
 
 fn port_available(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `build_ollama_provider` reads process-wide env vars; gate with a mutex
+    /// so parallel tests don't stomp on each other.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev: Vec<(String, Option<String>)> = vars
+            .iter()
+            .map(|(k, _)| ((*k).to_string(), std::env::var(*k).ok()))
+            .collect();
+        // SAFETY: the ENV_LOCK mutex serializes access to process-wide env
+        // vars; no other threads in this test binary touch these keys.
+        unsafe {
+            for (k, v) in vars {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+        f();
+        // SAFETY: same as above.
+        unsafe {
+            for (k, v) in prev {
+                match v {
+                    Some(val) => std::env::set_var(&k, val),
+                    None => std::env::remove_var(&k),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ollama_disabled_without_models() {
+        with_env(&[("OLLAMA_MODELS", None), ("OLLAMA_BASE_URL", None)], || {
+            assert!(build_ollama_provider().is_none());
+        });
+    }
+
+    #[test]
+    fn ollama_stanza_has_openai_compatible_shape() {
+        with_env(
+            &[
+                ("OLLAMA_MODELS", Some("llama3.2, qwen2.5-coder:7b ,")),
+                ("OLLAMA_BASE_URL", None),
+            ],
+            || {
+                let stanza = build_ollama_provider().expect("provider");
+                assert!(stanza.contains(r#""npm": "@ai-sdk/openai-compatible""#));
+                assert!(stanza.contains(r#""baseURL": "http://localhost:11434/v1""#));
+                assert!(stanza.contains(r#""llama3.2": {}"#));
+                assert!(stanza.contains(r#""qwen2.5-coder:7b": {}"#));
+            },
+        );
+    }
+
+    #[test]
+    fn ollama_respects_custom_base_url() {
+        with_env(
+            &[
+                ("OLLAMA_MODELS", Some("llama3.2")),
+                ("OLLAMA_BASE_URL", Some("http://ollama.local:11434/v1")),
+            ],
+            || {
+                let stanza = build_ollama_provider().expect("provider");
+                assert!(stanza.contains(r#""baseURL": "http://ollama.local:11434/v1""#));
+            },
+        );
+    }
+
+    #[test]
+    fn inline_config_emits_ollama_only() {
+        let cleared: Vec<(&str, Option<&str>)> = PROVIDER_KEY_MAP
+            .iter()
+            .map(|(_, k)| (*k, None))
+            .chain([
+                ("OLLAMA_MODELS", Some("llama3.2")),
+                ("OLLAMA_BASE_URL", None),
+                ("OPENCODE_MODEL", Some("ollama/llama3.2")),
+            ])
+            .collect();
+        with_env(&cleared, || {
+            let cfg = ProcessManagerConfig {
+                default_model: Some("ollama/llama3.2".into()),
+                ..ProcessManagerConfig::default()
+            };
+            let json = build_inline_config(&cfg).expect("inline config");
+            assert!(json.contains(r#""ollama""#));
+            assert!(json.contains(r#""model": "ollama/llama3.2""#));
+            let parsed: serde_json::Value =
+                serde_json::from_str(&json).expect("valid JSON");
+            assert!(parsed["provider"]["ollama"]["models"]["llama3.2"].is_object());
+        });
+    }
 }

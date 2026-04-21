@@ -6,12 +6,39 @@ import "../../styles/global.css";
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1"
+    />
     <title>Project — Stem Cell</title>
     <link rel="icon" type="image/png" href="/favicon.png" />
     <meta name="theme-color" content="#0a0a0b" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <style>
+      html,
+      body {
+        /* Use the dynamic viewport unit so iOS Safari's collapsing
+           address bar doesn't leave 60px of dead space at the bottom,
+           and the fallback `100vh` keeps older browsers usable. */
+        height: 100vh;
+        height: 100dvh;
+        overscroll-behavior: none;
+      }
+      /* Prevent iOS double-tap zoom on interactive controls inside the
+         project shell while still letting users pinch to zoom content
+         (images in preview, long log lines, etc.) if they need to. */
+      button,
+      input,
+      textarea {
+        touch-action: manipulation;
+      }
+    </style>
   </head>
-  <body class="h-screen overflow-hidden bg-neutral-950 text-neutral-100 antialiased">
+  <body class="overflow-hidden bg-neutral-950 text-neutral-100 antialiased">
     <div id="project-root" class="h-full"></div>
 
     <script>

@@ -151,48 +151,93 @@ function TabBar({
   onChange,
   hasLogs,
   hasLivePreview,
+  /** `mobile` variant adds the Preview tab and uses bigger touch targets
+   *  so the tabs never disappear once the user navigates to Preview on
+   *  a phone. `desktop` keeps the compact underline style inside the
+   *  left sidebar where Preview is permanently visible as a panel. */
+  variant = "desktop",
 }: {
   active: LeftTab;
   onChange: (t: LeftTab) => void;
   hasLogs: boolean;
-  /** Whether a preview is reachable (drives the mobile "Preview" tab's
-   *  live-dot indicator). Hidden entirely on md+ viewports because the
-   *  preview panel is permanently visible there. */
   hasLivePreview: boolean;
+  variant?: "mobile" | "desktop";
 }) {
+  const isMobile = variant === "mobile";
+
   const tabClass = (isActive: boolean) =>
-    `px-4 py-2.5 text-xs font-medium transition ${
-      isActive
-        ? "border-b-2 border-indigo-500 text-neutral-100"
-        : "text-neutral-500 hover:text-neutral-300"
-    }`;
+    isMobile
+      ? `relative flex-1 px-3 py-3 text-[13px] font-medium transition min-h-[44px] ${
+          isActive
+            ? "text-neutral-100"
+            : "text-neutral-500 active:text-neutral-300"
+        }`
+      : `relative px-4 py-2.5 text-xs font-medium transition ${
+          isActive
+            ? "border-b-2 border-indigo-500 text-neutral-100"
+            : "text-neutral-500 hover:text-neutral-300"
+        }`;
+
+  /** Sliding indicator for the mobile tab bar — much more tappable
+   *  than a 2px underline and gives a clearer "you are here" signal
+   *  when the Preview panel is taking over the entire viewport. */
+  const activeIndex = active === "chat" ? 0 : active === "logs" ? 1 : 2;
 
   return (
-    <div className="flex border-b border-neutral-800">
-      <button onClick={() => onChange("chat")} className={tabClass(active === "chat")}>
+    <div
+      className={
+        isMobile
+          ? "relative flex border-b border-neutral-800 bg-neutral-950"
+          : "flex border-b border-neutral-800"
+      }
+      role="tablist"
+    >
+      <button
+        role="tab"
+        aria-selected={active === "chat"}
+        onClick={() => onChange("chat")}
+        className={tabClass(active === "chat")}
+      >
         Chat
       </button>
       <button
+        role="tab"
+        aria-selected={active === "logs"}
         onClick={() => onChange("logs")}
-        className={`relative ${tabClass(active === "logs")}`}
+        className={tabClass(active === "logs")}
       >
         Logs
         {hasLogs && active !== "logs" && (
-          <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span
+            className={`absolute h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse ${
+              isMobile ? "top-2.5 right-3" : "top-2 right-2"
+            }`}
+          />
         )}
       </button>
       {/* Preview tab is mobile-only. On md+ the preview panel is
        *  always visible on the right, so exposing a "Preview" tab
        *  there would just be dead UI. */}
-      <button
-        onClick={() => onChange("preview")}
-        className={`relative md:hidden ${tabClass(active === "preview")}`}
-      >
-        Preview
-        {hasLivePreview && active !== "preview" && (
-          <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-indigo-400" />
-        )}
-      </button>
+      {isMobile && (
+        <button
+          role="tab"
+          aria-selected={active === "preview"}
+          onClick={() => onChange("preview")}
+          className={tabClass(active === "preview")}
+        >
+          Preview
+          {hasLivePreview && active !== "preview" && (
+            <span className="absolute top-2.5 right-3 h-1.5 w-1.5 rounded-full bg-indigo-400" />
+          )}
+        </button>
+      )}
+      {isMobile && (
+        <span
+          className="pointer-events-none absolute bottom-0 h-0.5 w-1/3 rounded-full bg-indigo-500 transition-transform duration-200 ease-out"
+          style={{ transform: `translateX(${activeIndex * 100}%)` }}
+          aria-hidden="true"
+        />
+      )}
     </div>
   );
 }
@@ -1350,57 +1395,113 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     }
   };
 
+  const hasLivePreview =
+    job?.status === "succeeded" && !!job?.deployment_id;
+
   return (
-    <div className="flex h-full flex-col">
-      {/* Top bar */}
-      <header className="flex items-center justify-between border-b border-neutral-800 bg-neutral-950/80 px-4 py-2 backdrop-blur">
-        <div className="flex items-center gap-3">
+    // `h-[100dvh]` keeps the shell pinned to the true visible viewport
+    // on iOS Safari (where `100vh` overshoots by the height of the
+    // collapsible chrome). The parent <body> also sets dvh but the
+    // component-level pin makes dev/preview outside that shell behave.
+    <div className="flex h-dvh flex-col">
+      {/* Top bar.
+       *
+       *  The `pt` arbitrary value uses `max()` so on iOS Safari /
+       *  standalone PWAs the header is always pushed below the status
+       *  bar / notch (env(safe-area-inset-top) reports e.g. 47px on an
+       *  iPhone 15), while desktop browsers — where the inset is 0 —
+       *  fall back to a comfortable 0.625rem. Without this, the nav
+       *  content sat underneath the iOS status bar and the logo was
+       *  clipped. */}
+      <header
+        className="flex flex-none items-center justify-between border-b border-neutral-800 bg-neutral-950/90 px-4 pb-2.5 backdrop-blur-md"
+        style={{
+          paddingTop: "max(env(safe-area-inset-top), 0.625rem)",
+        }}
+      >
+        <div className="flex min-w-0 items-center gap-2.5">
           <a
             href="/"
-            className="text-sm font-bold tracking-tight text-neutral-100 hover:text-indigo-400 transition"
+            aria-label="Back to Stem Cell home"
+            className="flex h-8 w-8 flex-none items-center justify-center rounded-md text-neutral-400 transition hover:bg-neutral-800 hover:text-neutral-100 md:hidden"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M10 3L5 8l5 5" />
+            </svg>
+          </a>
+          <a
+            href="/"
+            className="truncate text-sm font-bold tracking-tight text-neutral-100 transition hover:text-indigo-400"
           >
             Stem Cell
           </a>
           <span className="text-neutral-700">/</span>
-          <span className="text-xs font-mono text-neutral-500">
+          <span className="truncate font-mono text-xs text-neutral-500">
             {projectId.slice(0, 8)}
           </span>
         </div>
-        {job?.status === "succeeded" && job.deployment_id && (
-          <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            <span className="text-xs text-emerald-400">Live</span>
+        {hasLivePreview && (
+          <div className="flex flex-none items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1">
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]" />
+            <span className="text-[11px] font-medium text-emerald-300">
+              Live
+            </span>
           </div>
         )}
       </header>
+
+      {/* Mobile-only tab bar — always visible, including when the
+       *  Preview panel has taken over the viewport. Previously this
+       *  lived inside the left panel, which meant switching to
+       *  Preview hid the tab bar entirely and left the user with no
+       *  way back to Chat/Logs. */}
+      <div className="md:hidden">
+        <TabBar
+          active={tab}
+          onChange={setTab}
+          hasLogs={!!job?.logs}
+          hasLivePreview={hasLivePreview}
+          variant="mobile"
+        />
+      </div>
 
       {/* Main area: left panel + right preview.
        *
        *  Responsive layout:
        *  - md+ (≥768px): classic split view. Left panel is a 420px
-       *    sidebar with Chat/Logs tabs; preview fills the rest. The
-       *    "Preview" tab is hidden in TabBar on md+.
-       *  - <md: single-column. The TabBar exposes a third "Preview"
-       *    tab; whichever tab is active takes the full viewport. This
-       *    keeps the left (chat) panel from squishing the preview into
-       *    a thin column that's effectively unusable on a phone. */}
-      <div className="flex flex-1 overflow-hidden">
+       *    sidebar with Chat/Logs tabs; preview fills the rest.
+       *  - <md: single-column. The persistent mobile TabBar above
+       *    decides which of the three panels is visible. */}
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left panel (Chat/Logs). On mobile this is hidden whenever
          *  the user has swiped to the Preview tab. */}
         <div
           className={`${
             tab === "preview" ? "hidden md:flex" : "flex"
-          } w-full md:w-[420px] md:min-w-[320px] flex-col border-r border-neutral-800 bg-neutral-950`}
+          } w-full min-h-0 md:w-[420px] md:min-w-[340px] flex-col border-r border-neutral-800 bg-neutral-950`}
         >
-          <TabBar
-            active={tab}
-            onChange={setTab}
-            hasLogs={!!job?.logs}
-            hasLivePreview={
-              job?.status === "succeeded" && !!job?.deployment_id
-            }
-          />
-          <div className="flex-1 overflow-hidden">
+          {/* Desktop-only TabBar inside left panel — matches the
+           *  original compact underline style and only shows Chat /
+           *  Logs because Preview is a permanent panel on md+. */}
+          <div className="hidden md:block">
+            <TabBar
+              active={tab}
+              onChange={setTab}
+              hasLogs={!!job?.logs}
+              hasLivePreview={hasLivePreview}
+              variant="desktop"
+            />
+          </div>
+          <div className="flex-1 min-h-0 overflow-hidden">
             {tab === "logs" ? (
               <LogViewer logs={job?.logs ?? ""} />
             ) : (
@@ -1431,7 +1532,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         <div
           className={`${
             tab === "preview" ? "flex" : "hidden md:flex"
-          } flex-1 flex-col bg-neutral-900`}
+          } flex-1 min-h-0 flex-col bg-neutral-900`}
         >
           <PreviewPanel
             deploymentId={job?.deployment_id ?? null}
@@ -1444,8 +1545,24 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         </div>
       </div>
 
-      {/* Bottom status bar */}
-      <StatusBar job={job} />
+      {/* Bottom status bar — padded to keep clear of the iOS home
+       *  indicator. Uses a wrapper div so `env()` reaches past the
+       *  arbitrary-variant pitfall while letting StatusBar render
+       *  `null` cleanly (no wasted safe-area space when idle). */}
+      {job ? (
+        <div
+          className="flex-none"
+          style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+        >
+          <StatusBar job={job} />
+        </div>
+      ) : (
+        <div
+          className="flex-none"
+          style={{ height: "env(safe-area-inset-bottom)" }}
+          aria-hidden="true"
+        />
+      )}
     </div>
   );
 }

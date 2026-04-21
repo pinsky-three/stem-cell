@@ -8,4 +8,5 @@ members = [
     "crates/runtime",
     "crates/stem-cli",
     "crates/stem-projects",
+    "crates/fully-local",
 ]

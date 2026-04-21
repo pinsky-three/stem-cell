@@ -1,0 +1,7 @@
+# oxibonsai-kernels 0.1.2 enables `#![feature(stdarch_aarch64_prefetch)]`
+# on aarch64, which is still unstable (rust-lang/rust#117217). Until upstream
+# gates this behind an opt-in cargo feature, this crate must build on nightly.
+# Scoped locally so the rest of the workspace keeps using stable.
+[toolchain]
+channel = "nightly"
+components = ["rustfmt", "clippy"]

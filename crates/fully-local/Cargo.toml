@@ -1,0 +1,15 @@
+[package]
+name = "fully-local"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Direct runtime dep so we can enable `metal` (not exposed on the `oxibonsai`
+# umbrella crate). `server` pulls in axum + tower + tower-http + tokio-full.
+oxibonsai-runtime = { version = "0.1.2", features = ["server", "metal"] }
+# Feature-unify simd-neon on AArch64 (no-op on other archs).
+oxibonsai-kernels = { version = "0.1.2", features = ["simd-neon"] }
+
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "signal"] }
+anyhow = "1.0"
+tracing = "0.1"

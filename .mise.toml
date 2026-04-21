@@ -135,3 +135,7 @@ run = "cargo run -q -p stem-cli -- init"
 [tasks."stem:clone"]
 description = "Clone an existing stem-cell project (usage: mise run stem:clone -- <git-url>)"
 run = "cargo run -q -p stem-cli -- clone"
+
+[tasks."fully-local:serve"]
+description = "Start fully-local server"
+run = "cargo +nightly run -p fully-local"

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { PromptInputBox } from "./ui/ai-prompt-box";
+import SignupInviteModal, { type InviteMode } from "./SignupInviteModal";
 
 const DEFAULT_ORG_ID = "00000000-0000-0000-0000-000000000001";
 const DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001";
@@ -998,11 +999,22 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   // normally. `PreviewPanel` uses this to show an overlay instead.
   const [isPreviewRestarting, setIsPreviewRestarting] = useState(false);
   const [projectScope, setProjectScope] = useState<string>("frontend");
+  // Anonymous → authenticated capture flow. `isAuthed === null` while we're
+  // still resolving `/auth/me`; we gate the hard-block on a *confirmed* false
+  // so a slow network doesn't lock out legitimate signed-in users.
+  const [isAuthed, setIsAuthed] = useState<boolean | null>(null);
+  const [inviteMode, setInviteMode] = useState<InviteMode | null>(null);
+  const [hasShownSoftInvite, setHasShownSoftInvite] = useState(false);
+  // Counts sends issued on THIS page only. Msg #1 was sent from the landing
+  // hero before the redirect, so sending-count >= 1 here means "user is
+  // trying to send a follow-up" → hard-gate kicks in for anonymous users.
+  const [sendsThisSession, setSendsThisSession] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
 
   const demoLimitReached = projectScope === "free";
+  const hardBlocked = inviteMode === "hard";
 
   const fetchProjectScope = useCallback(async () => {
     try {
@@ -1018,6 +1030,24 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   useEffect(() => {
     fetchProjectScope();
   }, [fetchProjectScope]);
+
+  // Resolve auth state once per mount. 200 = authed, anything else = anon.
+  // We don't re-poll: the invite flow sends the user out to GitHub OAuth,
+  // which round-trips back with a full page reload and re-runs this hook.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/auth/me", { credentials: "same-origin" });
+        if (!cancelled) setIsAuthed(res.ok);
+      } catch {
+        if (!cancelled) setIsAuthed(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const stopPolling = useCallback(() => {
     if (timerRef.current) {
@@ -1191,6 +1221,21 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           scheduleBuildJobRefetches(data.job_id, setJob);
           stopPolling();
         }
+
+        // Soft signup invite: first completed build + anonymous visitor.
+        // This is the "wow, it worked" moment — highest conversion window.
+        // We gate on `isAuthed === false` (not just falsy) so the modal
+        // never flashes while `/auth/me` is still in flight.
+        setIsAuthed((authed) => {
+          setHasShownSoftInvite((shown) => {
+            if (!shown && authed === false) {
+              setInviteMode((current) => current ?? "soft");
+              return true;
+            }
+            return shown;
+          });
+          return authed;
+        });
       } catch {
         /* ignore */
       }
@@ -1360,6 +1405,15 @@ export default function ProjectView({ projectId }: { projectId: string }) {
 
   const handleSend = async (content: string) => {
     if (demoLimitReached) return;
+    // Hard gate: anonymous users get one free send from the hero page, and
+    // any additional attempt on this ProjectView must sign in first. We
+    // only enforce once auth has been confirmed anonymous (`false`) so a
+    // slow /auth/me probe can't lock out a signed-in user.
+    if (isAuthed === false && sendsThisSession >= 1) {
+      setInviteMode("hard");
+      return;
+    }
+    setSendsThisSession((n) => n + 1);
     const optimistic: Message = {
       id: crypto.randomUUID(),
       role: "user",
@@ -1512,7 +1566,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
               <ChatPanel
                 messages={messages}
                 onSend={handleSend}
-                isLoading={isLoading}
+                isLoading={isLoading || hardBlocked}
                 timeline={timeline}
                 demoLimitReached={demoLimitReached}
               />
@@ -1563,6 +1617,22 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           aria-hidden="true"
         />
       )}
+
+      <SignupInviteModal
+        open={inviteMode !== null}
+        mode={inviteMode ?? "soft"}
+        returnTo={
+          typeof window !== "undefined"
+            ? window.location.pathname + window.location.search
+            : `/project/${projectId}`
+        }
+        onDismiss={() => {
+          // Hard mode disables the dismiss affordance inside the modal, but
+          // guard here too so a stray state update can't accidentally clear
+          // the gate without the user actually signing in.
+          if (inviteMode === "soft") setInviteMode(null);
+        }}
+      />
     </div>
   );
 }

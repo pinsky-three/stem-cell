@@ -1,16 +1,91 @@
 use axum::extract::{Path, Query, State};
 use axum::response::Redirect;
 use axum_extra::extract::CookieJar;
+use base64::Engine;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, RedirectUrl, Scope,
     TokenResponse, TokenUrl,
 };
+use rand::RngCore;
 use serde::Deserialize;
 
 use super::AppState;
 use super::config::OAuthProviderConfig;
 use super::repository;
 use super::routes::{AuthError, session_cookie};
+
+/// Maximum length of a client-supplied `return_to` path. Caps the size of
+/// the OAuth `state` parameter we have to round-trip and keeps the param
+/// well under provider limits.
+const MAX_RETURN_TO_LEN: usize = 512;
+
+/// Validate and normalise a client-supplied post-login redirect target.
+///
+/// We only accept same-origin relative paths: must start with a single
+/// `/`, must not start with `//` (which would be a protocol-relative
+/// URL), and must not contain a scheme. This closes the door on open
+/// redirect abuse where a signed link like
+/// `/auth/oauth/github?return_to=https://evil.example.com` would bounce
+/// the authenticated user off our domain immediately after login.
+fn sanitize_return_to(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.len() > MAX_RETURN_TO_LEN {
+        return None;
+    }
+    if !trimmed.starts_with('/') || trimmed.starts_with("//") {
+        return None;
+    }
+    // Reject control chars + whitespace so smuggled newlines can't end up
+    // in a Location header.
+    if trimmed.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Build the OAuth `state` parameter. Format:
+///   `<random-hex>` (plain CSRF token, no return_to)
+///   `<random-hex>.<base64url(return_to)>` (with return_to)
+///
+/// The random prefix preserves the CSRF-token shape expected by the OAuth
+/// provider; the suffix carries the redirect destination we re-validate
+/// in the callback.
+fn build_oauth_state(return_to: Option<&str>) -> String {
+    let mut bytes = [0u8; 16];
+    rand::rng().fill_bytes(&mut bytes);
+    let csrf = hex_encode(&bytes);
+    match return_to {
+        Some(path) => {
+            let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(path.as_bytes());
+            format!("{csrf}.{encoded}")
+        }
+        None => csrf,
+    }
+}
+
+/// Recover the return_to path from the callback `state`. Returns None if
+/// no return_to was round-tripped, or if anything about the encoded value
+/// no longer passes `sanitize_return_to` (belt-and-braces: the browser
+/// could have been redirected through a malicious link generator).
+fn extract_return_to(state: Option<&str>) -> Option<String> {
+    let state = state?;
+    let (_csrf, encoded) = state.split_once('.')?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded)
+        .ok()?;
+    let s = std::str::from_utf8(&decoded).ok()?;
+    sanitize_return_to(s)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
 
 struct ProviderUrls {
     auth_url: &'static str,
@@ -47,9 +122,19 @@ fn get_provider_config<'a>(state: &'a AppState, provider: &str) -> Option<&'a OA
 
 // ── GET /auth/oauth/:provider ───────────────────────────────────────────
 
+/// Query params for the initial `/auth/oauth/:provider` redirect. The
+/// optional `return_to` is a relative path we should bounce the user
+/// back to after a successful login — e.g. `/project/abc?job=xyz`.
+#[derive(Deserialize)]
+pub struct OAuthRedirectQuery {
+    #[serde(default)]
+    pub return_to: Option<String>,
+}
+
 pub async fn oauth_redirect(
     State(state): State<AppState>,
     Path(provider): Path<String>,
+    Query(q): Query<OAuthRedirectQuery>,
 ) -> Result<Redirect, AuthError> {
     let urls = provider_urls(&provider)
         .ok_or_else(|| AuthError::Internal(format!("unsupported provider: {provider}")))?;
@@ -76,7 +161,14 @@ pub async fn oauth_redirect(
             RedirectUrl::new(redirect_url).map_err(|e| AuthError::Internal(e.to_string()))?,
         );
 
-    let mut auth_request = client.authorize_url(CsrfToken::new_random);
+    // If the caller asked us to land them on a specific page after login,
+    // sanitise the target (same-origin only) and encode it into the OAuth
+    // `state` so the callback can recover it without server-side storage.
+    let sanitized_return = q.return_to.as_deref().and_then(sanitize_return_to);
+    let csrf_state = build_oauth_state(sanitized_return.as_deref());
+
+    let mut auth_request =
+        client.authorize_url(|| CsrfToken::new(csrf_state.clone()));
     for scope in urls.scopes {
         auth_request = auth_request.add_scope(Scope::new(scope.to_string()));
     }
@@ -90,7 +182,9 @@ pub async fn oauth_redirect(
 #[derive(Deserialize)]
 pub struct OAuthCallback {
     pub code: String,
-    #[allow(dead_code)]
+    /// `state` is echoed by the provider untouched. We use it to recover
+    /// the `return_to` path the user started the flow from; see
+    /// `build_oauth_state` / `extract_return_to` for the encoding.
     pub state: Option<String>,
 }
 
@@ -214,7 +308,12 @@ pub async fn oauth_callback(
         state.auth_config.session_ttl_hours,
     ));
 
-    Ok((jar, Redirect::to("/")))
+    // Re-validate the return_to recovered from state before handing it to
+    // `Redirect::to` — the provider echoes `state` verbatim and a tampered
+    // link could flip it to an off-site URL between authorize + callback.
+    let destination = extract_return_to(params.state.as_deref()).unwrap_or_else(|| "/".to_string());
+
+    Ok((jar, Redirect::to(&destination)))
 }
 
 // ── User info fetching ──────────────────────────────────────────────────

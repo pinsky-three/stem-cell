@@ -2,6 +2,12 @@
 mod run_build;
 mod cleanup_deployments;
 mod spawn_environment;
+mod connect_github_installation;
+mod refresh_github_installation_state;
+mod connect_repo_to_project;
+mod start_experiment_branch;
+mod push_project_changes_to_repo;
+mod open_experiment_pull_request;
 mod ai_provider_integration;
 mod hosting_provider_integration;
 mod payment_provider_integration;

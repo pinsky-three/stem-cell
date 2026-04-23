@@ -73,6 +73,16 @@ import Base from "../../layouts/Base.astro";
         <p id="count-usage_records" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
         <p class="mt-1 text-xs text-neutral-500">/admin/usage_records</p>
       </a>
+      <a href="/admin/github_installations" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">GithubInstallation</h3>
+        <p id="count-github_installations" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
+        <p class="mt-1 text-xs text-neutral-500">/admin/github_installations</p>
+      </a>
+      <a href="/admin/repo_connections" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-indigo-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">RepoConnection</h3>
+        <p id="count-repo_connections" class="mt-2 text-2xl font-bold text-indigo-400">...</p>
+        <p class="mt-1 text-xs text-neutral-500">/admin/repo_connections</p>
+      </a>
     </div>
 
     <h2 class="mt-14 text-xl font-bold tracking-tight text-neutral-300">Systems</h2>
@@ -112,6 +122,46 @@ import Base from "../../layouts/Base.astro";
         <h3 class="text-lg font-semibold">SpawnEnvironment</h3>
         <p class="mt-2 text-sm text-neutral-400">Creates a project, queues a build job, and spawns a Podman container to clone a repo and run mise run dev</p>
         <p class="mt-2 text-xs text-neutral-500">4 inputs &middot; POST /api/systems/spawn_environment</p>
+      </a>
+      <a href="/admin/systems/connect_github_installation" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">ConnectGithubInstallation</h3>
+        <p class="mt-2 text-sm text-neutral-400">Upserts a GitHub App installation for an org (identified by GitHub's installation id). Persists account login, target type, permissions snapshot, and status. Upsert semantics: re-running with the same installation_id refreshes the metadata.</p>
+        <p class="mt-2 text-xs text-neutral-500">7 inputs &middot; POST /api/systems/connect_github_installation</p>
+      </a>
+      <a href="/admin/systems/refresh_github_installation_state" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">RefreshGithubInstallationState</h3>
+        <p class="mt-2 text-sm text-neutral-400">Re-queries GitHub for the current installation state (permissions, suspended/deleted) and updates the record. Marks installation inactive if GitHub reports suspended/deleted. Requires GitHub App JWT signing wiring.</p>
+        <p class="mt-2 text-xs text-neutral-500">1 inputs &middot; POST /api/systems/refresh_github_installation_state</p>
+      </a>
+      <a href="/admin/systems/connect_repo_to_project" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">ConnectRepoToProject</h3>
+        <p class="mt-2 text-sm text-neutral-400">Binds a GitHub repo to a project via an installation. Enforces the one-active-connection-per-project invariant (deactivates any prior active RepoConnection) and defaults the tracked branch to 'main' when not supplied.</p>
+        <p class="mt-2 text-xs text-neutral-500">5 inputs &middot; POST /api/systems/connect_repo_to_project</p>
+      </a>
+      <a href="/admin/systems/disconnect_repo_from_project" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">DisconnectRepoFromProject</h3>
+        <p class="mt-2 text-sm text-neutral-400">Marks the repo connection inactive. Does not revoke the underlying installation — revocation is a separate owner action on GitHub.</p>
+        <p class="mt-2 text-xs text-neutral-500">1 inputs &middot; POST /api/systems/disconnect_repo_from_project</p>
+      </a>
+      <a href="/admin/systems/start_experiment_branch" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">StartExperimentBranch</h3>
+        <p class="mt-2 text-sm text-neutral-400">Generates a deterministic experiment branch name (exp/<project-slug>/<utc-timestamp>) and creates the ref on GitHub using installation-scoped auth. Base is the connection's default branch unless base_sha is supplied.</p>
+        <p class="mt-2 text-xs text-neutral-500">2 inputs &middot; POST /api/systems/start_experiment_branch</p>
+      </a>
+      <a href="/admin/systems/push_project_changes_to_repo" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">PushProjectChangesToRepo</h3>
+        <p class="mt-2 text-sm text-neutral-400">Pushes the project checkout to the connected repo on the given branch. Mints a short-lived installation access token per push; never stores repo credentials.</p>
+        <p class="mt-2 text-xs text-neutral-500">3 inputs &middot; POST /api/systems/push_project_changes_to_repo</p>
+      </a>
+      <a href="/admin/systems/open_experiment_pull_request" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">OpenExperimentPullRequest</h3>
+        <p class="mt-2 text-sm text-neutral-400">Opens a pull request from the experiment branch to the repo's default branch via the GitHub API, using installation-scoped auth.</p>
+        <p class="mt-2 text-xs text-neutral-500">4 inputs &middot; POST /api/systems/open_experiment_pull_request</p>
+      </a>
+      <a href="/admin/systems/mark_repo_lifecycle_state" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">MarkRepoLifecycleState</h3>
+        <p class="mt-2 text-sm text-neutral-400">Updates the lifecycle state of a repo connection (e.g. 'error', 'connected', 'disconnected'). Used by webhook handlers and reconcilers to keep the local view in sync with GitHub.</p>
+        <p class="mt-2 text-xs text-neutral-500">3 inputs &middot; POST /api/systems/mark_repo_lifecycle_state</p>
       </a>
     </div>
   </div>
@@ -176,6 +226,16 @@ import Base from "../../layouts/Base.astro";
       document.getElementById('count-usage_records').textContent=d.length+' records';
     }).catch(()=>{
       document.getElementById('count-usage_records').textContent='--';
+    });
+    fetch('/api/github_installations').then(r=>r.json()).then(d=>{
+      document.getElementById('count-github_installations').textContent=d.length+' records';
+    }).catch(()=>{
+      document.getElementById('count-github_installations').textContent='--';
+    });
+    fetch('/api/repo_connections').then(r=>r.json()).then(d=>{
+      document.getElementById('count-repo_connections').textContent=d.length+' records';
+    }).catch(()=>{
+      document.getElementById('count-repo_connections').textContent='--';
     });
   </script>
 </Base>

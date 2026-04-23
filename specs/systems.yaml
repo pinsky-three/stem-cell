@@ -342,3 +342,188 @@ systems:
       - "UserNotFound"
       - "SpawnFailed(String)"
       - "DatabaseError(String)"
+
+  # ────────────────────────────────────────────────────────────────
+  # GitHub App lifecycle
+  # ────────────────────────────────────────────────────────────────
+  #
+  # Design note: repo authority is a GitHub App *installation*, not a
+  # long-lived OAuth repo token. Installations are the unit we connect,
+  # refresh, and revoke. Each project maps to at most one active
+  # RepoConnection bound to a single installation. All branch/push/PR
+  # operations are installation-scoped and mint short-lived installation
+  # access tokens on demand (contract-mode: actual GitHub API calls are
+  # implemented in the runtime, not modeled declaratively).
+
+  # ── 8. Connect a GitHub App installation ──────────────────────
+  - name: "ConnectGithubInstallation"
+    mode: "contract"
+    description: "Upserts a GitHub App installation for an org (identified by GitHub's installation id). Persists account login, target type, permissions snapshot, and status. Upsert semantics: re-running with the same installation_id refreshes the metadata."
+    input:
+      - { name: "org_id",            type: "uuid",   required: true }
+      - { name: "installer_user_id", type: "uuid",   required: false }
+      - { name: "installation_id",   type: "bigint", required: true }
+      - { name: "account_login",     type: "string", required: true }
+      - { name: "target_type",       type: "string", required: true }
+      - { name: "permissions",       type: "string", required: true }
+      - { name: "status",            type: "string", required: false }
+    output:
+      - { name: "github_installation_id", type: "uuid" }
+      - { name: "status",                 type: "string" }
+      - { name: "active",                 type: "bool" }
+    errors:
+      - "OrgNotFound"
+      - "InvalidTargetType"
+      - "InstallationUnverified(String)"
+      - "DatabaseError(String)"
+
+  # ── 9. Refresh installation state from GitHub ──────────────────
+  - name: "RefreshGithubInstallationState"
+    mode: "contract"
+    description: "Re-queries GitHub for the current installation state (permissions, suspended/deleted) and updates the record. Marks installation inactive if GitHub reports suspended/deleted. Requires GitHub App JWT signing wiring."
+    input:
+      - { name: "github_installation_id", type: "uuid", required: true }
+    output:
+      - { name: "status",      type: "string" }
+      - { name: "active",      type: "bool" }
+      - { name: "permissions", type: "string" }
+    errors:
+      - "InstallationNotFound"
+      - "GithubApiError(String)"
+      - "DatabaseError(String)"
+
+  # ── 10. Connect a repo to a project ────────────────────────────
+  - name: "ConnectRepoToProject"
+    mode: "contract"
+    description: "Binds a GitHub repo to a project via an installation. Enforces the one-active-connection-per-project invariant (deactivates any prior active RepoConnection) and defaults the tracked branch to 'main' when not supplied."
+    input:
+      - { name: "project_id",             type: "uuid",   required: true }
+      - { name: "github_installation_id", type: "uuid",   required: true }
+      - { name: "owner",                  type: "string", required: true }
+      - { name: "repo",                   type: "string", required: true }
+      - { name: "default_branch",         type: "string", required: false }
+    output:
+      - { name: "repo_connection_id", type: "uuid" }
+      - { name: "default_branch",     type: "string" }
+      - { name: "status",             type: "string" }
+    errors:
+      - "ProjectNotFound"
+      - "InstallationNotFound"
+      - "InstallationInactive"
+      - "RepoNotAccessible(String)"
+      - "DatabaseError(String)"
+
+  # ── 11. Disconnect a repo from a project ───────────────────────
+  - name: "DisconnectRepoFromProject"
+    description: "Marks the repo connection inactive. Does not revoke the underlying installation — revocation is a separate owner action on GitHub."
+    input:
+      - { name: "repo_connection_id", type: "uuid", required: true }
+    steps:
+      - kind: "load_one"
+        entity: "RepoConnection"
+        by: "input.repo_connection_id"
+        as: "conn"
+        not_found: "Repo connection not found"
+
+      - kind: "update"
+        entity: "RepoConnection"
+        target: "conn.id"
+        set:
+          - { field: "status", value: "disconnected" }
+          - { field: "active", value: false }
+
+      - kind: "emit_event"
+        event: "repo_disconnected"
+        payload:
+          - { field: "repo_connection_id", from: "conn.id" }
+          - { field: "project_id",         from: "conn.project_id" }
+
+    result:
+      - { name: "repo_connection", from: "conn" }
+
+  # ── 12. Start an experiment branch ─────────────────────────────
+  - name: "StartExperimentBranch"
+    mode: "contract"
+    description: "Generates a deterministic experiment branch name (exp/<project-slug>/<utc-timestamp>) and creates the ref on GitHub using installation-scoped auth. Base is the connection's default branch unless base_sha is supplied."
+    input:
+      - { name: "project_id", type: "uuid",   required: true }
+      - { name: "base_sha",   type: "string", required: false }
+    output:
+      - { name: "branch_name", type: "string" }
+      - { name: "base_branch", type: "string" }
+      - { name: "base_sha",    type: "string" }
+      - { name: "status",      type: "string" }
+    errors:
+      - "ProjectNotFound"
+      - "RepoNotConnected"
+      - "InstallationInactive"
+      - "GithubApiError(String)"
+
+  # ── 13. Push project changes to the repo ───────────────────────
+  - name: "PushProjectChangesToRepo"
+    mode: "contract"
+    description: "Pushes the project checkout to the connected repo on the given branch. Mints a short-lived installation access token per push; never stores repo credentials."
+    input:
+      - { name: "project_id",     type: "uuid",   required: true }
+      - { name: "branch_name",    type: "string", required: true }
+      - { name: "commit_message", type: "string", required: true }
+    output:
+      - { name: "commit_sha", type: "string" }
+      - { name: "status",     type: "string" }
+    errors:
+      - "ProjectNotFound"
+      - "RepoNotConnected"
+      - "InstallationInactive"
+      - "NothingToPush"
+      - "PushFailed(String)"
+      - "GithubApiError(String)"
+
+  # ── 14. Open an experiment pull request ────────────────────────
+  - name: "OpenExperimentPullRequest"
+    mode: "contract"
+    description: "Opens a pull request from the experiment branch to the repo's default branch via the GitHub API, using installation-scoped auth."
+    input:
+      - { name: "project_id",  type: "uuid",   required: true }
+      - { name: "branch_name", type: "string", required: true }
+      - { name: "title",       type: "string", required: true }
+      - { name: "body",        type: "string", required: false }
+    output:
+      - { name: "pr_number", type: "int" }
+      - { name: "pr_url",    type: "string" }
+      - { name: "status",    type: "string" }
+    errors:
+      - "ProjectNotFound"
+      - "RepoNotConnected"
+      - "InstallationInactive"
+      - "PullRequestFailed(String)"
+      - "GithubApiError(String)"
+
+  # ── 15. Mark repo lifecycle state ──────────────────────────────
+  - name: "MarkRepoLifecycleState"
+    description: "Updates the lifecycle state of a repo connection (e.g. 'error', 'connected', 'disconnected'). Used by webhook handlers and reconcilers to keep the local view in sync with GitHub."
+    input:
+      - { name: "repo_connection_id", type: "uuid",   required: true }
+      - { name: "status",             type: "string", required: true }
+      - { name: "active",             type: "bool",   required: true }
+    steps:
+      - kind: "load_one"
+        entity: "RepoConnection"
+        by: "input.repo_connection_id"
+        as: "conn"
+        not_found: "Repo connection not found"
+
+      - kind: "update"
+        entity: "RepoConnection"
+        target: "conn.id"
+        set:
+          - { field: "status", from: "input.status" }
+          - { field: "active", from: "input.active" }
+
+      - kind: "emit_event"
+        event: "repo_lifecycle_changed"
+        payload:
+          - { field: "repo_connection_id", from: "conn.id" }
+          - { field: "status",             from: "conn.status" }
+
+    result:
+      - { name: "repo_connection", from: "conn" }

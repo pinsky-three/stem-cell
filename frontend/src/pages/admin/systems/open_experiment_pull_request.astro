@@ -1,0 +1,104 @@
+<!-- @generated from specs/systems.yaml — do not edit -->
+---
+import Base from "../../../layouts/Base.astro";
+---
+<Base title="OpenExperimentPullRequest | Systems" noindex={true}>
+  <div class="mx-auto max-w-3xl px-6 py-12">
+    <div class="flex items-center gap-4">
+      <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
+      <h1 class="text-3xl font-bold tracking-tight">OpenExperimentPullRequest</h1>
+    </div>
+    <p class="mt-2 text-sm text-neutral-400">Opens a pull request from the experiment branch to the repo's default branch via the GitHub API, using installation-scoped auth.</p>
+    <p class="mt-1 text-xs text-neutral-600">POST /api/systems/open_experiment_pull_request</p>
+
+    <form id="system-form" class="mt-8 flex flex-col gap-4">
+      <div class="rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 flex flex-col gap-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-neutral-500">Input</h2>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">project id</label>
+              <input type="text" name="project_id" placeholder="project_id (UUID)"
+                pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">branch name</label>
+              <input type="text" name="branch_name" placeholder="branch_name"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">title</label>
+              <input type="text" name="title" placeholder="title"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">body</label>
+              <input type="text" name="body" placeholder="body"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+            </div>
+      </div>
+      <button type="submit" id="submit-btn"
+        class="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold transition hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed">
+        Execute
+      </button>
+    </form>
+
+    <div id="result-panel" class="mt-6 hidden">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-neutral-500 mb-2">Result</h2>
+      <p class="text-xs text-neutral-600 mb-2">No result fields</p>
+      <pre id="result-body"
+        class="overflow-auto rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 text-xs text-neutral-300 max-h-96"></pre>
+    </div>
+
+    <div id="error-panel" class="mt-6 hidden">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-red-400 mb-2">Error</h2>
+      <pre id="error-body"
+        class="overflow-auto rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-xs text-red-300 max-h-96"></pre>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('system-form');
+    const submitBtn = document.getElementById('submit-btn');
+    const resultPanel = document.getElementById('result-panel');
+    const resultBody = document.getElementById('result-body');
+    const errorPanel = document.getElementById('error-panel');
+    const errorBody = document.getElementById('error-body');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Executing...';
+      resultPanel.classList.add('hidden');
+      errorPanel.classList.add('hidden');
+
+      const body = {
+          project_id: form.elements['project_id'].value,
+          branch_name: form.elements['branch_name'].value,
+          title: form.elements['title'].value,
+          body: form.elements['body'].value || null
+      };
+
+      try {
+        const res = await fetch('/api/systems/open_experiment_pull_request', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          resultBody.textContent = JSON.stringify(data, null, 2);
+          resultPanel.classList.remove('hidden');
+        } else {
+          errorBody.textContent = JSON.stringify(data, null, 2);
+          errorPanel.classList.remove('hidden');
+        }
+      } catch (err) {
+        errorBody.textContent = err.message;
+        errorPanel.classList.remove('hidden');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Execute';
+      }
+    });
+  </script>
+</Base>

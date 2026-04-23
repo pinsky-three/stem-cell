@@ -213,6 +213,56 @@ entities:
         required: false
         references: { entity: "Project", field: "id" }
 
+  # ── GitHub Lifecycle ──────────────────────────────────────────
+  # Authority for repo access is a GitHub App *installation*, not
+  # a long-lived OAuth repo token. OAuth (if present elsewhere) is
+  # identity-only; all repo ops are installation-scoped.
+
+  - name: "GithubInstallation"
+    table: "github_installations"
+    id: { name: "id", type: "uuid" }
+    fields:
+      # GitHub's numeric installation id (unique per app install).
+      - { name: "installation_id", type: "bigint", required: true, unique: true }
+      # Login of the account the app is installed on (user or org).
+      - { name: "account_login",   type: "string", required: true }
+      # "User" | "Organization" — mirrors GitHub's target_type.
+      - { name: "target_type",     type: "string", required: true }
+      # JSON snapshot of granted permissions (e.g. {"contents":"write","pull_requests":"write"}).
+      - { name: "permissions",     type: "text",   required: true }
+      # "active" | "suspended" | "deleted" — lifecycle state.
+      - { name: "status",          type: "string", required: true }
+      - { name: "active",          type: "bool",   required: true }
+      - name: "org_id"
+        type: "uuid"
+        required: true
+        references: { entity: "Organization", field: "id" }
+      # User who triggered the install (nullable: installation may outlive the installer).
+      - name: "installer_user_id"
+        type: "uuid"
+        required: false
+        references: { entity: "User", field: "id" }
+
+  - name: "RepoConnection"
+    table: "repo_connections"
+    id: { name: "id", type: "uuid" }
+    fields:
+      - { name: "owner",          type: "string", required: true }
+      - { name: "repo",           type: "string", required: true }
+      - { name: "default_branch", type: "string", required: true }
+      # "connected" | "disconnected" | "error".
+      - { name: "status",         type: "string", required: true }
+      # One active connection per project; older ones are kept (soft) for audit.
+      - { name: "active",         type: "bool",   required: true }
+      - name: "project_id"
+        type: "uuid"
+        required: true
+        references: { entity: "Project", field: "id" }
+      - name: "installation_id"
+        type: "uuid"
+        required: true
+        references: { entity: "GithubInstallation", field: "id" }
+
 # ────────────────────────────────────────────────────────────────
 # Relations
 # ────────────────────────────────────────────────────────────────
@@ -220,15 +270,17 @@ entities:
 relations:
 
   # ── Organization (hub) ────────────────────────────────────────
-  - { name: "memberships",    kind: "has_many", source: "Organization", target: "Membership",  foreign_key: "org_id" }
-  - { name: "projects",       kind: "has_many", source: "Organization", target: "Project",     foreign_key: "org_id" }
-  - { name: "subscriptions",  kind: "has_many", source: "Organization", target: "Subscription", foreign_key: "org_id" }
-  - { name: "usage_records",  kind: "has_many", source: "Organization", target: "UsageRecord", foreign_key: "org_id" }
+  - { name: "memberships",         kind: "has_many", source: "Organization", target: "Membership",         foreign_key: "org_id" }
+  - { name: "projects",            kind: "has_many", source: "Organization", target: "Project",            foreign_key: "org_id" }
+  - { name: "subscriptions",       kind: "has_many", source: "Organization", target: "Subscription",       foreign_key: "org_id" }
+  - { name: "usage_records",       kind: "has_many", source: "Organization", target: "UsageRecord",        foreign_key: "org_id" }
+  - { name: "github_installations", kind: "has_many", source: "Organization", target: "GithubInstallation", foreign_key: "org_id" }
 
   # ── User ──────────────────────────────────────────────────────
-  - { name: "memberships",       kind: "has_many", source: "User", target: "Membership", foreign_key: "user_id" }
-  - { name: "created_projects",  kind: "has_many", source: "User", target: "Project",    foreign_key: "creator_id" }
-  - { name: "messages",          kind: "has_many", source: "User", target: "Message",    foreign_key: "author_id" }
+  - { name: "memberships",          kind: "has_many", source: "User", target: "Membership",        foreign_key: "user_id" }
+  - { name: "created_projects",     kind: "has_many", source: "User", target: "Project",           foreign_key: "creator_id" }
+  - { name: "messages",             kind: "has_many", source: "User", target: "Message",           foreign_key: "author_id" }
+  - { name: "installed_github_apps", kind: "has_many", source: "User", target: "GithubInstallation", foreign_key: "installer_user_id" }
 
   # ── Membership ────────────────────────────────────────────────
   - { name: "org",  kind: "belongs_to", source: "Membership", target: "Organization", foreign_key: "org_id" }
@@ -242,13 +294,14 @@ relations:
   - { name: "plan", kind: "belongs_to", source: "Subscription", target: "Plan",         foreign_key: "plan_id" }
 
   # ── Project ───────────────────────────────────────────────────
-  - { name: "org",           kind: "belongs_to", source: "Project", target: "Organization", foreign_key: "org_id" }
-  - { name: "creator",      kind: "belongs_to", source: "Project", target: "User",         foreign_key: "creator_id" }
-  - { name: "conversations", kind: "has_many",  source: "Project", target: "Conversation", foreign_key: "project_id" }
-  - { name: "build_jobs",   kind: "has_many",   source: "Project", target: "BuildJob",     foreign_key: "project_id" }
-  - { name: "artifacts",    kind: "has_many",   source: "Project", target: "Artifact",     foreign_key: "project_id" }
-  - { name: "deployments",  kind: "has_many",   source: "Project", target: "Deployment",   foreign_key: "project_id" }
-  - { name: "usage_records", kind: "has_many",  source: "Project", target: "UsageRecord",  foreign_key: "project_id" }
+  - { name: "org",              kind: "belongs_to", source: "Project", target: "Organization",  foreign_key: "org_id" }
+  - { name: "creator",          kind: "belongs_to", source: "Project", target: "User",          foreign_key: "creator_id" }
+  - { name: "conversations",    kind: "has_many",   source: "Project", target: "Conversation",  foreign_key: "project_id" }
+  - { name: "build_jobs",       kind: "has_many",   source: "Project", target: "BuildJob",      foreign_key: "project_id" }
+  - { name: "artifacts",        kind: "has_many",   source: "Project", target: "Artifact",      foreign_key: "project_id" }
+  - { name: "deployments",      kind: "has_many",   source: "Project", target: "Deployment",    foreign_key: "project_id" }
+  - { name: "usage_records",    kind: "has_many",   source: "Project", target: "UsageRecord",   foreign_key: "project_id" }
+  - { name: "repo_connections", kind: "has_many",   source: "Project", target: "RepoConnection", foreign_key: "project_id" }
 
   # ── Conversation ──────────────────────────────────────────────
   - { name: "project",  kind: "belongs_to", source: "Conversation", target: "Project", foreign_key: "project_id" }
@@ -276,3 +329,12 @@ relations:
   # ── UsageRecord ───────────────────────────────────────────────
   - { name: "org",     kind: "belongs_to", source: "UsageRecord", target: "Organization", foreign_key: "org_id" }
   - { name: "project", kind: "belongs_to", source: "UsageRecord", target: "Project",      foreign_key: "project_id" }
+
+  # ── GithubInstallation ────────────────────────────────────────
+  - { name: "org",              kind: "belongs_to", source: "GithubInstallation", target: "Organization",   foreign_key: "org_id" }
+  - { name: "installer",        kind: "belongs_to", source: "GithubInstallation", target: "User",           foreign_key: "installer_user_id" }
+  - { name: "repo_connections", kind: "has_many",   source: "GithubInstallation", target: "RepoConnection", foreign_key: "installation_id" }
+
+  # ── RepoConnection ────────────────────────────────────────────
+  - { name: "project",      kind: "belongs_to", source: "RepoConnection", target: "Project",            foreign_key: "project_id" }
+  - { name: "installation", kind: "belongs_to", source: "RepoConnection", target: "GithubInstallation", foreign_key: "installation_id" }

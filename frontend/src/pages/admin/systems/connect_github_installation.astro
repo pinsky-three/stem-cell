@@ -1,0 +1,123 @@
+<!-- @generated from specs/systems.yaml — do not edit -->
+---
+import Base from "../../../layouts/Base.astro";
+---
+<Base title="ConnectGithubInstallation | Systems" noindex={true}>
+  <div class="mx-auto max-w-3xl px-6 py-12">
+    <div class="flex items-center gap-4">
+      <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
+      <h1 class="text-3xl font-bold tracking-tight">ConnectGithubInstallation</h1>
+    </div>
+    <p class="mt-2 text-sm text-neutral-400">Upserts a GitHub App installation for an org (identified by GitHub's installation id). Persists account login, target type, permissions snapshot, and status. Upsert semantics: re-running with the same installation_id refreshes the metadata.</p>
+    <p class="mt-1 text-xs text-neutral-600">POST /api/systems/connect_github_installation</p>
+
+    <form id="system-form" class="mt-8 flex flex-col gap-4">
+      <div class="rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 flex flex-col gap-4">
+        <h2 class="text-sm font-semibold uppercase tracking-wider text-neutral-500">Input</h2>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">org id</label>
+              <input type="text" name="org_id" placeholder="org_id (UUID)"
+                pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">installer user id</label>
+              <input type="text" name="installer_user_id" placeholder="installer_user_id (UUID)"
+                pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">installation id</label>
+              <input type="number" name="installation_id" placeholder="installation_id" step="1"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">account login</label>
+              <input type="text" name="account_login" placeholder="account_login"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">target type</label>
+              <input type="text" name="target_type" placeholder="target_type"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">permissions</label>
+              <input type="text" name="permissions" placeholder="permissions"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">status</label>
+              <input type="text" name="status" placeholder="status"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+            </div>
+      </div>
+      <button type="submit" id="submit-btn"
+        class="rounded-lg bg-emerald-600 px-6 py-2.5 text-sm font-semibold transition hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed">
+        Execute
+      </button>
+    </form>
+
+    <div id="result-panel" class="mt-6 hidden">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-neutral-500 mb-2">Result</h2>
+      <p class="text-xs text-neutral-600 mb-2">No result fields</p>
+      <pre id="result-body"
+        class="overflow-auto rounded-xl border border-neutral-800 bg-neutral-900/50 p-4 text-xs text-neutral-300 max-h-96"></pre>
+    </div>
+
+    <div id="error-panel" class="mt-6 hidden">
+      <h2 class="text-sm font-semibold uppercase tracking-wider text-red-400 mb-2">Error</h2>
+      <pre id="error-body"
+        class="overflow-auto rounded-xl border border-red-900/50 bg-red-950/30 p-4 text-xs text-red-300 max-h-96"></pre>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('system-form');
+    const submitBtn = document.getElementById('submit-btn');
+    const resultPanel = document.getElementById('result-panel');
+    const resultBody = document.getElementById('result-body');
+    const errorPanel = document.getElementById('error-panel');
+    const errorBody = document.getElementById('error-body');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Executing...';
+      resultPanel.classList.add('hidden');
+      errorPanel.classList.add('hidden');
+
+      const body = {
+          org_id: form.elements['org_id'].value,
+          installer_user_id: form.elements['installer_user_id'].value || null,
+          installation_id: form.elements['installation_id'].value ? Number(form.elements['installation_id'].value) : null,
+          account_login: form.elements['account_login'].value,
+          target_type: form.elements['target_type'].value,
+          permissions: form.elements['permissions'].value,
+          status: form.elements['status'].value || null
+      };
+
+      try {
+        const res = await fetch('/api/systems/connect_github_installation', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          resultBody.textContent = JSON.stringify(data, null, 2);
+          resultPanel.classList.remove('hidden');
+        } else {
+          errorBody.textContent = JSON.stringify(data, null, 2);
+          errorPanel.classList.remove('hidden');
+        }
+      } catch (err) {
+        errorBody.textContent = err.message;
+        errorPanel.classList.remove('hidden');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Execute';
+      }
+    });
+  </script>
+</Base>

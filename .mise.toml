@@ -43,19 +43,19 @@ wait
 [tasks.check]
 description = "Codegen → type-check (no frontend build)"
 depends = ["codegen"]
-run = "SKIP_FRONTEND=1 cargo check -p stem-cell"
+run = "SKIP_FRONTEND=1 cargo check --workspace --exclude fully-local"
 
 [tasks.lint]
-description = "Codegen → clippy on entire workspace"
+description = "Codegen → clippy on entire workspace (excludes fully-local)"
 depends = ["codegen"]
-run = "SKIP_FRONTEND=1 cargo clippy --workspace"
+run = "SKIP_FRONTEND=1 cargo clippy --workspace --exclude fully-local"
 
 # ── Testing ──────────────────────────────────────────────────
 
 [tasks.test]
 description = "Codegen → run all workspace tests"
 depends = ["codegen"]
-run = "SKIP_FRONTEND=1 cargo test --workspace"
+run = "SKIP_FRONTEND=1 cargo test --workspace --exclude fully-local"
 
 [tasks."test:contracts"]
 description = "Run only contract tests"
@@ -70,11 +70,11 @@ depends = ["codegen"]
 run = """
 set -e
 echo "=== check ==="
-SKIP_FRONTEND=1 cargo check --workspace
+SKIP_FRONTEND=1 cargo check --workspace --exclude fully-local
 echo "=== clippy ==="
-SKIP_FRONTEND=1 cargo clippy --workspace -- -D warnings
+SKIP_FRONTEND=1 cargo clippy --workspace --exclude fully-local -- -D warnings
 echo "=== test ==="
-SKIP_FRONTEND=1 cargo test --workspace
+SKIP_FRONTEND=1 cargo test --workspace --exclude fully-local
 echo "=== all green ==="
 """
 

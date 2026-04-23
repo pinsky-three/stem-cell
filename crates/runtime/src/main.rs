@@ -4,6 +4,7 @@ use stem_cell::{github_app, github_webhook, integrations, migrate, proxy, resour
 mod auth;
 mod email;
 mod events;
+mod github_setup;
 mod migrate_auth;
 
 use std::net::SocketAddr;
@@ -100,6 +101,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Auth routes use AppState — resolve it before merging
     let auth_routes = auth::router().with_state(state.clone());
 
+    // GitHub App install flow (public /info + session-gated /setup). Always
+    // mounted: /info reports configured=false when the App isn't wired, and
+    // /setup degrades to a friendly redirect in that case.
+    let github_setup_routes = github_setup::router().with_state(state.clone());
+
     // /admin/* protection is applied as a GLOBAL middleware below (see
     // `.layer(admin_guard)`), and pass-through for every non-/admin path.
     //
@@ -194,6 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(api)
         .merge(system_routes)
         .merge(auth_routes)
+        .merge(github_setup_routes)
         .merge(health_routes)
         .merge(env_proxy)
         .merge(event_routes)

@@ -150,13 +150,18 @@ import Base from "../../layouts/Base.astro";
       </a>
       <a href="/admin/systems/push_project_changes_to_repo" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
         <h3 class="text-lg font-semibold">PushProjectChangesToRepo</h3>
-        <p class="mt-2 text-sm text-neutral-400">Pushes the project checkout to the connected repo on the given branch. Mints a short-lived installation access token per push; never stores repo credentials.</p>
-        <p class="mt-2 text-xs text-neutral-500">3 inputs &middot; POST /api/systems/push_project_changes_to_repo</p>
+        <p class="mt-2 text-sm text-neutral-400">Pushes a local checkout to the connected repo on the given branch using a short-lived installation access token. Never stores repo credentials.</p>
+        <p class="mt-2 text-xs text-neutral-500">5 inputs &middot; POST /api/systems/push_project_changes_to_repo</p>
       </a>
       <a href="/admin/systems/open_experiment_pull_request" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
         <h3 class="text-lg font-semibold">OpenExperimentPullRequest</h3>
         <p class="mt-2 text-sm text-neutral-400">Opens a pull request from the experiment branch to the repo's default branch via the GitHub API, using installation-scoped auth.</p>
         <p class="mt-2 text-xs text-neutral-500">4 inputs &middot; POST /api/systems/open_experiment_pull_request</p>
+      </a>
+      <a href="/admin/systems/create_repo_from_template" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
+        <h3 class="text-lg font-semibold">CreateRepoFromTemplate</h3>
+        <p class="mt-2 text-sm text-neutral-400">Creates a new repo in the user's/org's GitHub account from a template and connects it to the project. Uses the installation's access token so no repo PAT is ever needed.</p>
+        <p class="mt-2 text-xs text-neutral-500">9 inputs &middot; POST /api/systems/create_repo_from_template</p>
       </a>
       <a href="/admin/systems/mark_repo_lifecycle_state" class="group rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 transition hover:border-emerald-600/40 hover:bg-neutral-900">
         <h3 class="text-lg font-semibold">MarkRepoLifecycleState</h3>

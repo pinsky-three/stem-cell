@@ -460,13 +460,21 @@ systems:
       - "GithubApiError(String)"
 
   # ── 13. Push project changes to the repo ───────────────────────
+  #
+  # `source_dir` is the absolute path of the local git checkout to push
+  # from (typically the job workspace under /tmp/stem-cell-<job_id>).
+  # When `force` is true, the remote ref is overwritten (used for seeding
+  # an empty repo from a template mirror). Otherwise a fast-forward push
+  # is attempted.
   - name: "PushProjectChangesToRepo"
     mode: "contract"
-    description: "Pushes the project checkout to the connected repo on the given branch. Mints a short-lived installation access token per push; never stores repo credentials."
+    description: "Pushes a local checkout to the connected repo on the given branch using a short-lived installation access token. Never stores repo credentials."
     input:
       - { name: "project_id",     type: "uuid",   required: true }
       - { name: "branch_name",    type: "string", required: true }
       - { name: "commit_message", type: "string", required: true }
+      - { name: "source_dir",     type: "string", required: true }
+      - { name: "force",          type: "bool",   required: false }
     output:
       - { name: "commit_sha", type: "string" }
       - { name: "status",     type: "string" }
@@ -497,6 +505,39 @@ systems:
       - "InstallationInactive"
       - "PullRequestFailed(String)"
       - "GithubApiError(String)"
+
+  # ── 15.a Create a repo from a GitHub template ──────────────────
+  #
+  # Thin wrapper over `POST /repos/{tpl_owner}/{tpl_repo}/generate` plus a
+  # local RepoConnection bind. This is the primary "new project → repo in
+  # the user's GitHub account" entrypoint: one call, one repo, one active
+  # connection. The installation must already have access to `new_owner`.
+  - name: "CreateRepoFromTemplate"
+    mode: "contract"
+    description: "Creates a new repo in the user's/org's GitHub account from a template and connects it to the project. Uses the installation's access token so no repo PAT is ever needed."
+    input:
+      - { name: "project_id",             type: "uuid",   required: true }
+      - { name: "github_installation_id", type: "uuid",   required: true }
+      - { name: "template_owner",         type: "string", required: true }
+      - { name: "template_repo",          type: "string", required: true }
+      - { name: "new_owner",              type: "string", required: true }
+      - { name: "new_name",               type: "string", required: true }
+      - { name: "description",            type: "string", required: false }
+      - { name: "private",                type: "bool",   required: false }
+      - { name: "include_all_branches",   type: "bool",   required: false }
+    output:
+      - { name: "owner",              type: "string" }
+      - { name: "repo",               type: "string" }
+      - { name: "default_branch",     type: "string" }
+      - { name: "html_url",           type: "string" }
+      - { name: "repo_connection_id", type: "uuid" }
+      - { name: "status",             type: "string" }
+    errors:
+      - "ProjectNotFound"
+      - "InstallationNotFound"
+      - "InstallationInactive"
+      - "GithubApiError(String)"
+      - "DatabaseError(String)"
 
   # ── 15. Mark repo lifecycle state ──────────────────────────────
   - name: "MarkRepoLifecycleState"

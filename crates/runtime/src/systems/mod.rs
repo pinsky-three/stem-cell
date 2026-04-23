@@ -10,6 +10,7 @@ mod connect_repo_to_project;
 mod start_experiment_branch;
 mod push_project_changes_to_repo;
 mod open_experiment_pull_request;
+mod create_repo_from_template;
 
 /// Concrete implementation of all contract-mode system traits.
 /// Each sub-module implements one trait on this struct.

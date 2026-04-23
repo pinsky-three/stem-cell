@@ -7,6 +7,8 @@ fn push_project_changes_to_repo_input_roundtrips_json() {
         project_id: uuid::Uuid::new_v4(),
         branch_name: "test".to_string(),
         commit_message: "test".to_string(),
+        source_dir: "test".to_string(),
+        force: Some(true),
     };
     let json = serde_json::to_string(&input).unwrap();
     let decoded: PushProjectChangesToRepoInput = serde_json::from_str(&json).unwrap();

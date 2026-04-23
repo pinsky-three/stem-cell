@@ -8,6 +8,7 @@ mod connect_repo_to_project;
 mod start_experiment_branch;
 mod push_project_changes_to_repo;
 mod open_experiment_pull_request;
+mod create_repo_from_template;
 mod ai_provider_integration;
 mod hosting_provider_integration;
 mod payment_provider_integration;

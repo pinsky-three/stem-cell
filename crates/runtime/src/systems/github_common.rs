@@ -10,21 +10,6 @@
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-/// Whether GitHub App credentials are present in the environment.
-///
-/// This is purely diagnostic: live refresh, push, and PR creation all need
-/// a GitHub App JWT signer (the `jsonwebtoken` crate) to mint installation
-/// access tokens. That dependency lives in `Cargo.toml`, which is outside
-/// the editable surface in `AGENTS.md`. We expose this helper so system
-/// implementations can return precise error messages instead of generic
-/// failures when the wiring is incomplete.
-pub(super) fn github_app_credentials_present() -> bool {
-    std::env::var("GITHUB_APP_ID").ok().is_some_and(|v| !v.is_empty())
-        && std::env::var("GITHUB_APP_PRIVATE_KEY")
-            .ok()
-            .is_some_and(|v| !v.is_empty())
-}
-
 /// Snapshot used by systems that operate on an active repo connection
 /// (`StartExperimentBranch`, `PushProjectChangesToRepo`,
 /// `OpenExperimentPullRequest`).

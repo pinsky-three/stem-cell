@@ -1,5 +1,5 @@
 use stem_cell::system_api;
-use stem_cell::{integrations, migrate, proxy, resource_api, systems};
+use stem_cell::{github_app, github_webhook, integrations, migrate, proxy, resource_api, systems};
 
 mod auth;
 mod email;
@@ -68,6 +68,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if auth_config.google.is_some() {
         tracing::info!("Google OAuth configured");
     }
+    if let Some(app_cfg) = github_app::config() {
+        tracing::info!(
+            app_id = app_cfg.app_id,
+            slug = ?app_cfg.app_slug,
+            "GitHub App configured"
+        );
+    } else {
+        tracing::info!("GitHub App not configured (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY[_PATH] / GITHUB_APP_WEBHOOK_SECRET)");
+    }
 
     let state = AppState {
         pool: pool.clone(),
@@ -132,6 +141,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SSE endpoint for streaming build events to the frontend
     let event_routes = events::router();
 
+    // GitHub App webhook — only mounted when the App is configured.
+    let github_webhook_routes = github_webhook::router(pool.clone());
+    if github_webhook_routes.is_some() {
+        tracing::info!("GitHub App webhook mounted at POST /github/app/webhook");
+    }
+
     // Health endpoints use PgPool state (consumes pool — must be last clone)
     let health_routes = Router::new()
         .route("/healthz", get(resource_api::healthz))
@@ -175,7 +190,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // service must be registered first — otherwise `/admin` and `/admin/`,
     // which are served by the ServeDir fallback, bypass `admin_guard`
     // entirely.
-    let app = Router::new()
+    let mut app = Router::new()
         .merge(api)
         .merge(system_routes)
         .merge(auth_routes)
@@ -183,7 +198,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(env_proxy)
         .merge(event_routes)
         .merge(spa_fallback)
-        .merge(Scalar::with_url("/api/docs", openapi))
+        .merge(Scalar::with_url("/api/docs", openapi));
+    if let Some(r) = github_webhook_routes {
+        app = app.merge(r);
+    }
+    let app = app
         .fallback_service(ServeDir::new(&serve_dir))
         // Global guard: enforces admin-only for /admin and /admin/*, and is a
         // pass-through for every other path. See auth::admin_guard for the

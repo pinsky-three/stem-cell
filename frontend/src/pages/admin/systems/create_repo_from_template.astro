@@ -2,14 +2,14 @@
 ---
 import Base from "../../../layouts/Base.astro";
 ---
-<Base title="PushProjectChangesToRepo | Systems" noindex={true}>
+<Base title="CreateRepoFromTemplate | Systems" noindex={true}>
   <div class="mx-auto max-w-3xl px-6 py-12">
     <div class="flex items-center gap-4">
       <a href="/admin" class="text-neutral-500 transition hover:text-neutral-300">&larr; Dashboard</a>
-      <h1 class="text-3xl font-bold tracking-tight">PushProjectChangesToRepo</h1>
+      <h1 class="text-3xl font-bold tracking-tight">CreateRepoFromTemplate</h1>
     </div>
-    <p class="mt-2 text-sm text-neutral-400">Pushes a local checkout to the connected repo on the given branch using a short-lived installation access token. Never stores repo credentials.</p>
-    <p class="mt-1 text-xs text-neutral-600">POST /api/systems/push_project_changes_to_repo</p>
+    <p class="mt-2 text-sm text-neutral-400">Creates a new repo in the user's/org's GitHub account from a template and connects it to the project. Uses the installation's access token so no repo PAT is ever needed.</p>
+    <p class="mt-1 text-xs text-neutral-600">POST /api/systems/create_repo_from_template</p>
 
     <form id="system-form" class="mt-8 flex flex-col gap-4">
       <div class="rounded-xl border border-neutral-800 bg-neutral-900/50 p-6 flex flex-col gap-4">
@@ -21,23 +21,43 @@ import Base from "../../../layouts/Base.astro";
                 class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
             </div>
         <div class="flex flex-col gap-1">
-              <label class="text-xs font-medium text-neutral-400">branch name</label>
-              <input type="text" name="branch_name" placeholder="branch_name"
+              <label class="text-xs font-medium text-neutral-400">github installation id</label>
+              <input type="text" name="github_installation_id" placeholder="github_installation_id (UUID)"
+                pattern="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
                 class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
             </div>
         <div class="flex flex-col gap-1">
-              <label class="text-xs font-medium text-neutral-400">commit message</label>
-              <input type="text" name="commit_message" placeholder="commit_message"
+              <label class="text-xs font-medium text-neutral-400">template owner</label>
+              <input type="text" name="template_owner" placeholder="template_owner"
                 class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
             </div>
         <div class="flex flex-col gap-1">
-              <label class="text-xs font-medium text-neutral-400">source dir</label>
-              <input type="text" name="source_dir" placeholder="source_dir"
+              <label class="text-xs font-medium text-neutral-400">template repo</label>
+              <input type="text" name="template_repo" placeholder="template_repo"
                 class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">new owner</label>
+              <input type="text" name="new_owner" placeholder="new_owner"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">new name</label>
+              <input type="text" name="new_name" placeholder="new_name"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" required />
+            </div>
+        <div class="flex flex-col gap-1">
+              <label class="text-xs font-medium text-neutral-400">description</label>
+              <input type="text" name="description" placeholder="description"
+                class="rounded-lg border border-neutral-700 bg-neutral-800 px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-500 focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
             </div>
         <label class="flex items-center gap-2 text-sm">
-              <input type="checkbox" name="force" class="rounded border-neutral-600 bg-neutral-800 text-emerald-500 focus:ring-emerald-500" />
-              force
+              <input type="checkbox" name="private" class="rounded border-neutral-600 bg-neutral-800 text-emerald-500 focus:ring-emerald-500" />
+              private
+            </label>
+        <label class="flex items-center gap-2 text-sm">
+              <input type="checkbox" name="include_all_branches" class="rounded border-neutral-600 bg-neutral-800 text-emerald-500 focus:ring-emerald-500" />
+              include all branches
             </label>
       </div>
       <button type="submit" id="submit-btn"
@@ -77,14 +97,18 @@ import Base from "../../../layouts/Base.astro";
 
       const body = {
           project_id: form.elements['project_id'].value,
-          branch_name: form.elements['branch_name'].value,
-          commit_message: form.elements['commit_message'].value,
-          source_dir: form.elements['source_dir'].value,
-          force: form.elements['force'].checked
+          github_installation_id: form.elements['github_installation_id'].value,
+          template_owner: form.elements['template_owner'].value,
+          template_repo: form.elements['template_repo'].value,
+          new_owner: form.elements['new_owner'].value,
+          new_name: form.elements['new_name'].value,
+          description: form.elements['description'].value || null,
+          private: form.elements['private'].checked,
+          include_all_branches: form.elements['include_all_branches'].checked
       };
 
       try {
-        const res = await fetch('/api/systems/push_project_changes_to_repo', {
+        const res = await fetch('/api/systems/create_repo_from_template', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),

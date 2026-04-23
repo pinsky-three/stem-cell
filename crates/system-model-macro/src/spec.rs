@@ -601,7 +601,7 @@ systems:
         let spec: SystemsSpec = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(spec.version, 1);
         assert_eq!(spec.integrations.len(), 3);
-        // 7 original systems + 8 GitHub-lifecycle systems.
-        assert_eq!(spec.systems.len(), 15);
+        // 7 original systems + 9 GitHub-lifecycle systems.
+        assert_eq!(spec.systems.len(), 16);
     }
 }

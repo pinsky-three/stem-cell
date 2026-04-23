@@ -43,6 +43,11 @@ time = "0.3"
 futures = "0.3"
 tokio-stream = "0.1"
 async-stream = "0.3"
+# GitHub App lifecycle: JWT signing (app identity) + HMAC-SHA256 (webhook verify).
+jsonwebtoken = "9"
+hmac = "0.12"
+sha2 = "0.10"
+subtle = "2"
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

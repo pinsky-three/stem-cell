@@ -67,6 +67,10 @@ pub fn router() -> Router<AppState> {
         .route("/github/app/info", get(info))
         .route("/github/app/status", get(status))
         .route("/github/app/sync", post(sync))
+        .route(
+            "/github/app/projects/{project_id}/persistence",
+            get(project_persistence),
+        )
         .route("/github/app/setup", get(setup))
 }
 
@@ -113,6 +117,39 @@ struct SyncResponse {
     synced: bool,
     github_login: Option<String>,
     installation: Option<InstallationSummary>,
+    message: String,
+}
+
+#[derive(Serialize)]
+struct RepoConnectionSummary {
+    id: Uuid,
+    owner: String,
+    repo: String,
+    default_branch: String,
+    status: String,
+    active: bool,
+    html_url: String,
+}
+
+#[derive(Serialize)]
+struct LatestJobSummary {
+    id: Uuid,
+    status: String,
+    model: String,
+    duration_ms: i64,
+    artifacts_count: i64,
+    updated_at: String,
+}
+
+#[derive(Serialize)]
+struct ProjectPersistenceResponse {
+    project_id: Uuid,
+    github_login: Option<String>,
+    github_storage_ready: bool,
+    installation: Option<InstallationSummary>,
+    repo_connection: Option<RepoConnectionSummary>,
+    latest_job: Option<LatestJobSummary>,
+    can_continue_building: bool,
     message: String,
 }
 
@@ -199,6 +236,51 @@ async fn sync(
         github_login: Some(github_login),
         installation: summary,
         message: "GitHub storage is connected. New successful builds will persist to a repo/branch automatically.".into(),
+    }))
+}
+
+async fn project_persistence(
+    State(state): State<AppState>,
+    MaybeAccount(account): MaybeAccount,
+    axum::extract::Path(project_id): axum::extract::Path<Uuid>,
+) -> Result<Json<ProjectPersistenceResponse>, (StatusCode, String)> {
+    let github_login = match account {
+        Some(account) => github_login_for_account(&state.pool, account.id)
+            .await
+            .map_err(internal)?,
+        None => None,
+    };
+    let installation = active_local_installation(&state.pool)
+        .await
+        .map_err(internal)?;
+    let repo_connection = active_repo_connection_for_project(&state.pool, project_id)
+        .await
+        .map_err(internal)?;
+    let latest_job = latest_job_for_project(&state.pool, project_id)
+        .await
+        .map_err(internal)?;
+
+    let github_storage_ready = repo_connection.is_some();
+    let can_continue_building = github_storage_ready || github_login.is_some();
+    let message = if github_storage_ready {
+        "This project is connected to GitHub persistence.".to_string()
+    } else if installation.is_some() {
+        "GitHub App storage is ready. The next successful edit will create/connect the project repo.".to_string()
+    } else if github_login.is_some() {
+        "GitHub identity is linked. Sync or install the GitHub App to persist this project.".to_string()
+    } else {
+        "Connect GitHub in Settings to keep building and persist this project.".to_string()
+    };
+
+    Ok(Json(ProjectPersistenceResponse {
+        project_id,
+        github_login,
+        github_storage_ready,
+        installation,
+        repo_connection,
+        latest_job,
+        can_continue_building,
+        message,
     }))
 }
 
@@ -304,6 +386,88 @@ async fn installation_summary_by_id(
         target_type: r.get("target_type"),
         status: r.get("status"),
         active: r.get("active"),
+    }))
+}
+
+async fn active_local_installation(
+    pool: &sqlx::PgPool,
+) -> Result<Option<InstallationSummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, account_login, target_type, status, active \
+         FROM github_installations \
+         WHERE org_id = $1 AND active = true AND status = 'active' \
+           AND deleted_at IS NULL \
+         ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(DEFAULT_ORG_ID)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| InstallationSummary {
+        id: r.get("id"),
+        account_login: r.get("account_login"),
+        target_type: r.get("target_type"),
+        status: r.get("status"),
+        active: r.get("active"),
+    }))
+}
+
+async fn active_repo_connection_for_project(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+) -> Result<Option<RepoConnectionSummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, owner, repo, default_branch, status, active \
+         FROM repo_connections \
+         WHERE project_id = $1 AND active = true AND deleted_at IS NULL \
+         ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| {
+        let owner: String = r.get("owner");
+        let repo: String = r.get("repo");
+        RepoConnectionSummary {
+            id: r.get("id"),
+            html_url: format!("https://github.com/{owner}/{repo}"),
+            owner,
+            repo,
+            default_branch: r.get("default_branch"),
+            status: r.get("status"),
+            active: r.get("active"),
+        }
+    }))
+}
+
+async fn latest_job_for_project(
+    pool: &sqlx::PgPool,
+    project_id: Uuid,
+) -> Result<Option<LatestJobSummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT bj.id, bj.status, bj.model, bj.duration_ms, bj.updated_at, \
+                COUNT(a.id)::bigint AS artifacts_count \
+           FROM build_jobs bj \
+           LEFT JOIN artifacts a ON a.build_job_id = bj.id AND a.deleted_at IS NULL \
+          WHERE bj.project_id = $1 AND bj.deleted_at IS NULL \
+          GROUP BY bj.id, bj.status, bj.model, bj.duration_ms, bj.updated_at \
+          ORDER BY bj.updated_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| {
+        let updated_at: chrono::DateTime<chrono::Utc> = r.get("updated_at");
+        LatestJobSummary {
+            id: r.get("id"),
+            status: r.get("status"),
+            model: r.get("model"),
+            duration_ms: r.get("duration_ms"),
+            artifacts_count: r.get("artifacts_count"),
+            updated_at: updated_at.to_rfc3339(),
+        }
     }))
 }
 

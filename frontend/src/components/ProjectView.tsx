@@ -48,6 +48,44 @@ interface BuildJob {
   project_id: string;
 }
 
+interface RepoConnectionSummary {
+  id: string;
+  owner: string;
+  repo: string;
+  default_branch: string;
+  status: string;
+  active: boolean;
+  html_url: string;
+}
+
+interface InstallationSummary {
+  id: string;
+  account_login: string;
+  target_type: string;
+  status: string;
+  active: boolean;
+}
+
+interface LatestJobSummary {
+  id: string;
+  status: string;
+  model: string;
+  duration_ms: number;
+  artifacts_count: number;
+  updated_at: string;
+}
+
+interface ProjectPersistence {
+  project_id: string;
+  github_login: string | null;
+  github_storage_ready: boolean;
+  installation: InstallationSummary | null;
+  repo_connection: RepoConnectionSummary | null;
+  latest_job: LatestJobSummary | null;
+  can_continue_building: boolean;
+  message: string;
+}
+
 /** OpenCode jobs may omit deployment_id in older rows; keep preview when refetching. */
 function mergeBuildJob(prev: BuildJob | null, next: BuildJob): BuildJob {
   const prevLogs = prev?.logs ?? "";
@@ -145,7 +183,7 @@ function timelineText(items: TimelineItem[]): string {
 
 // ── Tabs ────────────────────────────────────────────────────────────────
 
-type LeftTab = "chat" | "logs" | "preview";
+type LeftTab = "chat" | "dashboard" | "logs" | "preview";
 
 function TabBar({
   active,
@@ -182,7 +220,8 @@ function TabBar({
   /** Sliding indicator for the mobile tab bar — much more tappable
    *  than a 2px underline and gives a clearer "you are here" signal
    *  when the Preview panel is taking over the entire viewport. */
-  const activeIndex = active === "chat" ? 0 : active === "logs" ? 1 : 2;
+  const activeIndex =
+    active === "chat" ? 0 : active === "dashboard" ? 1 : active === "logs" ? 2 : 3;
 
   return (
     <div
@@ -200,6 +239,14 @@ function TabBar({
         className={tabClass(active === "chat")}
       >
         Chat
+      </button>
+      <button
+        role="tab"
+        aria-selected={active === "dashboard"}
+        onClick={() => onChange("dashboard")}
+        className={tabClass(active === "dashboard")}
+      >
+        Dashboard
       </button>
       <button
         role="tab"
@@ -234,7 +281,7 @@ function TabBar({
       )}
       {isMobile && (
         <span
-          className="pointer-events-none absolute bottom-0 h-0.5 w-1/3 rounded-full bg-indigo-500 transition-transform duration-200 ease-out"
+          className="pointer-events-none absolute bottom-0 h-0.5 w-1/4 rounded-full bg-indigo-500 transition-transform duration-200 ease-out"
           style={{ transform: `translateX(${activeIndex * 100}%)` }}
           aria-hidden="true"
         />
@@ -383,7 +430,13 @@ function ThinkingBubble({ timeline }: { timeline: TimelineItem[] }) {
 
 // ── Chat panel ──────────────────────────────────────────────────────────
 
-function DemoLimitBanner() {
+function DemoLimitBanner({
+  githubLogin,
+  message,
+}: {
+  githubLogin?: string | null;
+  message?: string;
+}) {
   return (
     <div className="border-t border-amber-900/40 bg-amber-950/30 px-4 py-3">
       <div className="flex items-center gap-2 text-amber-400/90">
@@ -403,9 +456,19 @@ function DemoLimitBanner() {
           <circle cx="8" cy="11.5" r="0.5" fill="currentColor" />
         </svg>
         <span className="text-xs font-medium">
-          Free demo limit reached — upgrade to keep building.
+          {githubLogin
+            ? "Connect GitHub storage to keep building and persist this project."
+            : message ?? "Free demo limit reached — sign in with GitHub to keep building."}
         </span>
       </div>
+      {githubLogin && (
+        <a
+          href="/settings"
+          className="mt-2 inline-flex rounded-lg border border-amber-500/30 px-2.5 py-1 text-xs font-medium text-amber-200 transition hover:bg-amber-500/10"
+        >
+          Open GitHub storage settings
+        </a>
+      )}
     </div>
   );
 }
@@ -415,14 +478,16 @@ function ChatPanel({
   onSend,
   isLoading,
   timeline,
-  demoLimitReached,
+  demoBlocked,
+  persistence,
 }: {
   messages: Message[];
   onSend: (msg: string) => void;
   isLoading: boolean;
   /** In-flight interleaved assistant output — empty between builds. */
   timeline: TimelineItem[];
-  demoLimitReached: boolean;
+  demoBlocked: boolean;
+  persistence: ProjectPersistence | null;
 }) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -461,8 +526,11 @@ function ChatPanel({
         {timeline.length > 0 && <ThinkingBubble timeline={timeline} />}
         <div ref={bottomRef} />
       </div>
-      {demoLimitReached ? (
-        <DemoLimitBanner />
+      {demoBlocked ? (
+        <DemoLimitBanner
+          githubLogin={persistence?.github_login}
+          message={persistence?.message}
+        />
       ) : (
         <div className="border-t border-neutral-800 p-3">
           <PromptInputBox
@@ -472,6 +540,154 @@ function ChatPanel({
           />
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Dashboard panel ─────────────────────────────────────────────────────
+
+function DashboardPanel({
+  projectId,
+  job,
+  projectScope,
+  persistence,
+  onRefresh,
+  onOpenChat,
+}: {
+  projectId: string;
+  job: BuildJob | null;
+  projectScope: string;
+  persistence: ProjectPersistence | null;
+  onRefresh: () => void;
+  onOpenChat: () => void;
+}) {
+  const repo = persistence?.repo_connection;
+  const installation = persistence?.installation;
+  const latest = persistence?.latest_job;
+  const persisted = !!repo;
+
+  return (
+    <div className="h-full overflow-y-auto bg-neutral-950 p-4 text-neutral-200">
+      <div className="space-y-4">
+        <section
+          className={`rounded-2xl border p-4 ${
+            persisted
+              ? "border-emerald-500/25 bg-emerald-950/20"
+              : "border-amber-500/25 bg-amber-950/20"
+          }`}
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-neutral-500">
+                GitHub persistence
+              </p>
+              <h2 className="mt-2 text-lg font-semibold text-neutral-100">
+                {persisted ? "Persisted as GitHub project" : "Not persisted yet"}
+              </h2>
+              <p className="mt-2 text-sm leading-6 text-neutral-400">
+                {persistence?.message ??
+                  "Checking whether this project has a GitHub repo connection..."}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onRefresh}
+              className="rounded-lg border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 transition hover:bg-neutral-800"
+            >
+              Refresh
+            </button>
+          </div>
+
+          {repo ? (
+            <a
+              href={repo.html_url}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-4 inline-flex rounded-xl bg-emerald-300 px-3 py-2 text-sm font-semibold text-neutral-950 transition hover:bg-emerald-200"
+            >
+              Open {repo.owner}/{repo.repo}
+            </a>
+          ) : (
+            <div className="mt-4 flex flex-wrap gap-2">
+              <a
+                href="/settings"
+                className="inline-flex rounded-xl bg-amber-300 px-3 py-2 text-sm font-semibold text-neutral-950 transition hover:bg-amber-200"
+              >
+                Set up GitHub persistence
+              </a>
+              {installation && (
+                <button
+                  type="button"
+                  onClick={onOpenChat}
+                  className="inline-flex rounded-xl border border-amber-400/30 px-3 py-2 text-sm font-semibold text-amber-100 transition hover:bg-amber-400/10"
+                >
+                  Send next message to create repo
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="grid gap-3">
+          <DashboardMetric label="Project" value={projectId.slice(0, 8)} />
+          <DashboardMetric label="Scope" value={projectScope || "frontend"} />
+          <DashboardMetric
+            label="Current job"
+            value={job ? `${job.status} · ${job.id.slice(0, 8)}` : "No active job"}
+          />
+          <DashboardMetric
+            label="Latest persisted build"
+            value={
+              latest
+                ? `${latest.status} · ${latest.artifacts_count} artifacts`
+                : "No build snapshot yet"
+            }
+          />
+        </section>
+
+        <section className="rounded-2xl border border-neutral-800 bg-neutral-900/40 p-4">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.22em] text-neutral-500">
+            Connection details
+          </p>
+          <dl className="mt-3 space-y-2 text-sm">
+            <DashboardRow label="GitHub user" value={persistence?.github_login ?? "Not linked"} />
+            <DashboardRow
+              label="App install"
+              value={
+                installation
+                  ? `${installation.account_login} · ${installation.status}`
+                  : "Not synced"
+              }
+            />
+            <DashboardRow
+              label="Repo"
+              value={repo ? `${repo.owner}/${repo.repo}` : "Not connected"}
+            />
+            <DashboardRow
+              label="Default branch"
+              value={repo?.default_branch ?? "Pending"}
+            />
+          </dl>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function DashboardMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-neutral-800 bg-neutral-900/40 px-3 py-2.5">
+      <p className="text-[10px] uppercase tracking-[0.18em] text-neutral-500">{label}</p>
+      <p className="mt-1 truncate text-sm font-medium text-neutral-200">{value}</p>
+    </div>
+  );
+}
+
+function DashboardRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <dt className="text-neutral-500">{label}</dt>
+      <dd className="truncate text-right text-neutral-200">{value}</dd>
     </div>
   );
 }
@@ -992,6 +1208,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
     null,
   );
   const [previewReloadNonce, setPreviewReloadNonce] = useState(0);
+  const [persistence, setPersistence] = useState<ProjectPersistence | null>(null);
   // Flips true while the deploy is being restarted (Vite killed → spawn →
   // health). During this window the proxy returns 502s because the upstream
   // dev server is genuinely down; surfacing those raw errors in the iframe
@@ -1014,6 +1231,8 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   const streamingMsgIdRef = useRef<string | null>(null);
 
   const demoLimitReached = projectScope === "free";
+  const githubCanContinue = persistence?.can_continue_building === true;
+  const demoBlocked = demoLimitReached && !githubCanContinue;
   const hardBlocked = inviteMode === "hard";
 
   const fetchProjectScope = useCallback(async () => {
@@ -1026,6 +1245,23 @@ export default function ProjectView({ projectId }: { projectId: string }) {
       /* ignore */
     }
   }, [projectId]);
+
+  const fetchPersistence = useCallback(async () => {
+    try {
+      const res = await fetch(`/github/app/projects/${projectId}/persistence`, {
+        credentials: "same-origin",
+      });
+      if (!res.ok) return;
+      const data: ProjectPersistence = await res.json();
+      setPersistence(data);
+    } catch {
+      /* ignore */
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    fetchPersistence();
+  }, [fetchPersistence]);
 
   useEffect(() => {
     fetchProjectScope();
@@ -1203,6 +1439,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         setIsLoading(false);
 
         fetchProjectScope();
+        window.setTimeout(fetchPersistence, 1200);
 
         // Don't touch `previewReloadNonce` here: `build.complete` fires
         // *before* `restart_deployment_after_opencode_build` tears Vite
@@ -1404,7 +1641,10 @@ export default function ProjectView({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   const handleSend = async (content: string) => {
-    if (demoLimitReached) return;
+    if (demoBlocked) {
+      setTab("dashboard");
+      return;
+    }
     // Hard gate: anonymous users get one free send from the hero page, and
     // any additional attempt on this ProjectView must sign in first. We
     // only enforce once auth has been confirmed anonymous (`false`) so a
@@ -1503,14 +1743,33 @@ export default function ProjectView({ projectId }: { projectId: string }) {
             {projectId.slice(0, 8)}
           </span>
         </div>
-        {hasLivePreview && (
-          <div className="flex flex-none items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]" />
-            <span className="text-[11px] font-medium text-emerald-300">
-              Live
-            </span>
-          </div>
-        )}
+        <div className="flex flex-none items-center gap-2">
+          {persistence?.repo_connection ? (
+            <button
+              type="button"
+              onClick={() => setTab("dashboard")}
+              className="hidden rounded-full border border-sky-500/20 bg-sky-500/10 px-2.5 py-1 text-[11px] font-medium text-sky-300 transition hover:bg-sky-500/15 sm:inline-flex"
+            >
+              GitHub persisted
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setTab("dashboard")}
+              className="hidden rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-300 transition hover:bg-amber-500/15 sm:inline-flex"
+            >
+              Not persisted
+            </button>
+          )}
+          {hasLivePreview && (
+            <div className="flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.7)]" />
+              <span className="text-[11px] font-medium text-emerald-300">
+                Live
+              </span>
+            </div>
+          )}
+        </div>
       </header>
 
       {/* Mobile-only tab bar — always visible, including when the
@@ -1545,7 +1804,7 @@ export default function ProjectView({ projectId }: { projectId: string }) {
         >
           {/* Desktop-only TabBar inside left panel — matches the
            *  original compact underline style and only shows Chat /
-           *  Logs because Preview is a permanent panel on md+. */}
+           *  Dashboard / Logs because Preview is a permanent panel on md+. */}
           <div className="hidden md:block">
             <TabBar
               active={tab}
@@ -1558,6 +1817,15 @@ export default function ProjectView({ projectId }: { projectId: string }) {
           <div className="flex-1 min-h-0 overflow-hidden">
             {tab === "logs" ? (
               <LogViewer logs={job?.logs ?? ""} />
+            ) : tab === "dashboard" ? (
+              <DashboardPanel
+                projectId={projectId}
+                job={job}
+                projectScope={projectScope}
+                persistence={persistence}
+                onRefresh={fetchPersistence}
+                onOpenChat={() => setTab("chat")}
+              />
             ) : (
               // tab === "chat" or (mobile) "preview" while the left
               // panel is hidden — rendering ChatPanel here is still
@@ -1568,7 +1836,8 @@ export default function ProjectView({ projectId }: { projectId: string }) {
                 onSend={handleSend}
                 isLoading={isLoading || hardBlocked}
                 timeline={timeline}
-                demoLimitReached={demoLimitReached}
+                demoBlocked={demoBlocked}
+                persistence={persistence}
               />
             )}
           </div>

@@ -37,19 +37,21 @@
 //!      reacts to.
 
 use axum::{
+    Json,
     Router,
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
-    routing::get,
+    routing::{get, post},
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sqlx::Row;
 use uuid::Uuid;
 
 use crate::auth::AppState;
-use crate::auth::middleware::MaybeAccount;
+use crate::auth::middleware::{CurrentAccount, MaybeAccount};
 use stem_cell::github_app::{self, AppClient};
 use stem_cell::system_api::{ConnectGithubInstallationInput, ConnectGithubInstallationSystem};
 use stem_cell::systems::AppSystems;
@@ -63,6 +65,8 @@ const DEFAULT_ORG_ID: Uuid = Uuid::from_u128(1);
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/github/app/info", get(info))
+        .route("/github/app/status", get(status))
+        .route("/github/app/sync", post(sync))
         .route("/github/app/setup", get(setup))
 }
 
@@ -84,6 +88,118 @@ async fn info() -> impl IntoResponse {
         None => (false, None),
     };
     axum::Json(InfoResponse { configured, slug })
+}
+
+#[derive(Serialize)]
+struct InstallationSummary {
+    id: Uuid,
+    account_login: String,
+    target_type: String,
+    status: String,
+    active: bool,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    configured: bool,
+    slug: Option<String>,
+    authenticated: bool,
+    github_login: Option<String>,
+    installations: Vec<InstallationSummary>,
+}
+
+#[derive(Serialize)]
+struct SyncResponse {
+    synced: bool,
+    github_login: Option<String>,
+    installation: Option<InstallationSummary>,
+    message: String,
+}
+
+async fn status(
+    State(state): State<AppState>,
+    MaybeAccount(account): MaybeAccount,
+) -> Result<Json<StatusResponse>, (StatusCode, String)> {
+    let (configured, slug) = match github_app::config() {
+        Some(cfg) => (true, cfg.app_slug.clone()),
+        None => (false, None),
+    };
+
+    let Some(account) = account else {
+        return Ok(Json(StatusResponse {
+            configured,
+            slug,
+            authenticated: false,
+            github_login: None,
+            installations: Vec::new(),
+        }));
+    };
+
+    let github_login = github_login_for_account(&state.pool, account.id)
+        .await
+        .map_err(internal)?;
+    let installations = local_installations(&state.pool)
+        .await
+        .map_err(internal)?;
+
+    Ok(Json(StatusResponse {
+        configured,
+        slug,
+        authenticated: true,
+        github_login,
+        installations,
+    }))
+}
+
+async fn sync(
+    State(state): State<AppState>,
+    CurrentAccount(account): CurrentAccount,
+) -> Result<Json<SyncResponse>, (StatusCode, String)> {
+    if github_app::config().is_none() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "GitHub App not configured".into(),
+        ));
+    }
+
+    let Some(github_login) = github_login_for_account(&state.pool, account.id)
+        .await
+        .map_err(internal)?
+    else {
+        return Ok(Json(SyncResponse {
+            synced: false,
+            github_login: None,
+            installation: None,
+            message: "Sign in with GitHub first so Stem Cell knows which GitHub account to sync.".into(),
+        }));
+    };
+
+    let Some(payload) = find_app_installation_for_login(github_login.as_str()).await? else {
+        return Ok(Json(SyncResponse {
+            synced: false,
+            github_login: Some(github_login),
+            installation: None,
+            message: "No GitHub App installation was found for this personal account. Install the App, then sync again.".into(),
+        }));
+    };
+
+    let out = upsert_installation_payload(&state.pool, &payload, DEFAULT_ORG_ID, None).await?;
+    let summary = installation_summary_by_id(&state.pool, out.github_installation_id)
+        .await
+        .map_err(internal)?;
+
+    tracing::info!(
+        github_installation_id = %out.github_installation_id,
+        github_login = %github_login,
+        "github installation synced from existing App installation"
+    );
+
+    Ok(Json(SyncResponse {
+        synced: true,
+        github_login: Some(github_login),
+        installation: summary,
+        message: "GitHub storage is connected. New successful builds will persist to a repo/branch automatically.".into(),
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -126,6 +242,187 @@ fn sanitize_return_to(raw: &str) -> Option<String> {
     }
 }
 
+fn internal(e: impl std::fmt::Display) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+async fn github_login_for_account(
+    pool: &sqlx::PgPool,
+    account_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT username FROM oauth_links \
+         WHERE account_id = $1 AND provider = 'github' \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(account_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.and_then(|r| r.get::<Option<String>, _>("username")))
+}
+
+async fn local_installations(pool: &sqlx::PgPool) -> Result<Vec<InstallationSummary>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT id, account_login, target_type, status, active \
+         FROM github_installations \
+         WHERE org_id = $1 AND deleted_at IS NULL \
+         ORDER BY active DESC, updated_at DESC",
+    )
+    .bind(DEFAULT_ORG_ID)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| InstallationSummary {
+            id: r.get("id"),
+            account_login: r.get("account_login"),
+            target_type: r.get("target_type"),
+            status: r.get("status"),
+            active: r.get("active"),
+        })
+        .collect())
+}
+
+async fn installation_summary_by_id(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> Result<Option<InstallationSummary>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT id, account_login, target_type, status, active \
+         FROM github_installations \
+         WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| InstallationSummary {
+        id: r.get("id"),
+        account_login: r.get("account_login"),
+        target_type: r.get("target_type"),
+        status: r.get("status"),
+        active: r.get("active"),
+    }))
+}
+
+async fn find_app_installation_for_login(
+    github_login: &str,
+) -> Result<Option<Value>, (StatusCode, String)> {
+    let app_client =
+        AppClient::new().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let res = app_client
+        .get("https://api.github.com/app/installations?per_page=100")
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("github call failed: {e}")))?;
+
+    if !res.status().is_success() {
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("github {status}: {body}"),
+        ));
+    }
+
+    let payload: Value = res
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parse error: {e}")))?;
+    let installations = payload
+        .as_array()
+        .ok_or((StatusCode::BAD_GATEWAY, "github response was not an array".into()))?;
+
+    Ok(installations.iter().find_map(|installation| {
+        let login = installation
+            .get("account")
+            .and_then(|a| a.get("login"))
+            .and_then(|v| v.as_str())?;
+        if login.eq_ignore_ascii_case(github_login) {
+            Some(installation.clone())
+        } else {
+            None
+        }
+    }))
+}
+
+async fn fetch_installation_payload(
+    installation_id: i64,
+) -> Result<Value, (StatusCode, String)> {
+    let app_client =
+        AppClient::new().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let url = format!("https://api.github.com/app/installations/{installation_id}");
+    let res = app_client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("github call failed: {e}")))?;
+    if !res.status().is_success() {
+        let status = res.status().as_u16();
+        let body = res.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("github {status}: {body}"),
+        ));
+    }
+    res.json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parse error: {e}")))
+}
+
+async fn upsert_installation_payload(
+    pool: &sqlx::PgPool,
+    payload: &Value,
+    org_id: Uuid,
+    installer_user_id: Option<Uuid>,
+) -> Result<stem_cell::system_api::ConnectGithubInstallationOutput, (StatusCode, String)> {
+    let installation_id = payload
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or((StatusCode::BAD_GATEWAY, "github response missing id".into()))?;
+    let account_login = payload
+        .get("account")
+        .and_then(|a| a.get("login"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let target_type = payload
+        .get("account")
+        .and_then(|a| a.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("User")
+        .to_string();
+    let permissions = payload
+        .get("permissions")
+        .cloned()
+        .unwrap_or(Value::Null)
+        .to_string();
+
+    if account_login.is_empty() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            "github response missing account.login".into(),
+        ));
+    }
+
+    let input = ConnectGithubInstallationInput {
+        installation_id,
+        account_login,
+        target_type,
+        permissions,
+        status: Some("active".into()),
+        org_id,
+        installer_user_id,
+    };
+
+    AppSystems
+        .execute(pool, input)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:?}")))
+}
+
 async fn setup(
     State(state): State<AppState>,
     MaybeAccount(account): MaybeAccount,
@@ -164,68 +461,9 @@ async fn setup(
     // ── Pull authoritative metadata from GitHub. Never trust the query
     //    params for account/login/permissions — a user could hand-craft the
     //    URL. The App JWT can only read installations owned by this App. ──
-    let app_client = AppClient::new()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let url = format!("https://api.github.com/app/installations/{installation_id}");
-    let res = app_client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("github call failed: {e}")))?;
-    if !res.status().is_success() {
-        let status = res.status().as_u16();
-        let body = res.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("github {status}: {body}"),
-        ));
-    }
-    let payload: Value = res
-        .json()
-        .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parse error: {e}")))?;
-
-    let account_login = payload
-        .get("account")
-        .and_then(|a| a.get("login"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let target_type = payload
-        .get("account")
-        .and_then(|a| a.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("User")
-        .to_string();
-    let permissions = payload
-        .get("permissions")
-        .cloned()
-        .unwrap_or(Value::Null)
-        .to_string();
-
-    if account_login.is_empty() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            "github response missing account.login".into(),
-        ));
-    }
-
+    let payload = fetch_installation_payload(installation_id).await?;
     let org_id = decoded.org_id.unwrap_or(DEFAULT_ORG_ID);
-
-    let input = ConnectGithubInstallationInput {
-        installation_id,
-        account_login,
-        target_type,
-        permissions,
-        status: Some("active".into()),
-        org_id,
-        installer_user_id: decoded.user_id,
-    };
-
-    let out = AppSystems
-        .execute(&state.pool, input)
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:?}")))?;
+    let out = upsert_installation_payload(&state.pool, &payload, org_id, decoded.user_id).await?;
 
     tracing::info!(
         github_installation_id = %out.github_installation_id,

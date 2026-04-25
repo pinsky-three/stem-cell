@@ -1,67 +1,84 @@
 ---
 import Base from "../../layouts/Base.astro";
 import InstallGithubAppButton from "../../components/InstallGithubAppButton";
-
-// This page is intentionally static-renderable. The install button is a
-// React island that calls /github/app/info at runtime to decide whether to
-// render itself, so we can ship one build regardless of whether the App is
-// wired in a given environment.
-//
-// The Setup URL handler at /github/app/setup redirects here after a
-// successful install with ?github=installed&installation=<uuid>. We read
-// those markers on the client and swap the CTA for a success card.
 ---
-<Base title="Connect GitHub" noindex={true}>
-  <main class="mx-auto flex min-h-[calc(100vh-4rem)] max-w-2xl flex-col items-center justify-center px-6 py-16">
-    <div id="status-banner" class="hidden mb-8 w-full"></div>
-
-    <div class="w-full rounded-2xl border border-neutral-800 bg-neutral-900/40 p-10 text-center">
-      <div class="mx-auto mb-6 flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-600/10 text-indigo-400">
-        <svg aria-hidden="true" viewBox="0 0 24 24" fill="currentColor" class="h-7 w-7">
-          <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
-        </svg>
-      </div>
-      <h1 class="text-2xl font-bold tracking-tight">Connect your GitHub account</h1>
-      <p class="mx-auto mt-3 max-w-md text-sm leading-relaxed text-neutral-400">
-        Install the Stem Cell GitHub App so each new project template gets persisted
-        as a real repo in your account, with scoped access via a short-lived installation
-        token — no long-lived PATs required.
-      </p>
-
-      <div class="mt-8 flex justify-center">
-        <InstallGithubAppButton client:only="react" />
-      </div>
-
-      <p class="mt-6 text-xs text-neutral-500">
-        Installation is revocable at any time from GitHub → Settings → Applications.
-      </p>
+<Base title="GitHub Storage" noindex={true}>
+  <main class="relative min-h-[calc(100vh-4rem)] overflow-hidden bg-[#060709] px-6 py-16 text-zinc-100">
+    <div class="pointer-events-none absolute inset-0">
+      <div class="absolute left-1/2 top-0 h-px w-[80vw] -translate-x-1/2 bg-linear-to-r from-transparent via-emerald-300/40 to-transparent"></div>
+      <div class="absolute -left-32 top-20 h-72 w-72 rounded-full bg-emerald-500/10 blur-3xl"></div>
+      <div class="absolute -right-32 bottom-20 h-80 w-80 rounded-full bg-sky-500/10 blur-3xl"></div>
+      <div class="absolute inset-0 opacity-[0.04]" style="background-image: radial-gradient(circle at 1px 1px, white 1px, transparent 0); background-size: 24px 24px;"></div>
     </div>
 
-    <!-- What happens next -->
-    <section class="mt-12 w-full">
-      <h2 class="text-sm font-semibold uppercase tracking-widest text-neutral-500">
-        What the install grants
-      </h2>
-      <ul class="mt-5 space-y-3 text-sm text-neutral-300">
-        <li class="flex items-start gap-3">
-          <span class="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-500/10 text-green-400">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z" clip-rule="evenodd"/></svg>
-          </span>
-          <span>Create new repos from our project templates directly in your GitHub account.</span>
-        </li>
-        <li class="flex items-start gap-3">
-          <span class="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-500/10 text-green-400">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z" clip-rule="evenodd"/></svg>
-          </span>
-          <span>Push experiment branches and open pull requests without handling any repo tokens yourself.</span>
-        </li>
-        <li class="flex items-start gap-3">
-          <span class="mt-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-green-500/10 text-green-400">
-            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M16.704 4.153a.75.75 0 01.143 1.052l-8 10.5a.75.75 0 01-1.127.075l-4.5-4.5a.75.75 0 011.06-1.06l3.894 3.893 7.48-9.817a.75.75 0 011.05-.143z" clip-rule="evenodd"/></svg>
-          </span>
-          <span>Revocable access — remove the app from GitHub and Stem Cell immediately loses its grip.</span>
-        </li>
-      </ul>
+    <div class="relative mx-auto grid max-w-6xl gap-10 lg:grid-cols-[0.95fr_1.05fr] lg:items-center">
+      <section class="space-y-8">
+        <div id="status-banner" class="hidden"></div>
+
+        <div class="inline-flex items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.24em] text-emerald-200">
+          Storage handshake
+        </div>
+
+        <div>
+          <h1 class="max-w-3xl text-5xl font-semibold tracking-[-0.06em] text-zinc-50 sm:text-6xl">
+            Keep every Stem Cell project alive in GitHub.
+          </h1>
+          <p class="mt-6 max-w-xl text-base leading-8 text-zinc-400">
+            Sign in with GitHub for identity, then let the GitHub App handle
+            repository access. If the App is already installed, Stem Cell syncs
+            it directly instead of sending you back into GitHub settings.
+          </p>
+        </div>
+
+        <div class="grid gap-3 text-sm text-zinc-300 sm:grid-cols-3">
+          <div class="rounded-3xl border border-zinc-800 bg-zinc-950/60 p-4">
+            <p class="text-xs uppercase tracking-[0.2em] text-zinc-500">One</p>
+            <p class="mt-2 font-medium">OAuth identifies you</p>
+          </div>
+          <div class="rounded-3xl border border-zinc-800 bg-zinc-950/60 p-4">
+            <p class="text-xs uppercase tracking-[0.2em] text-zinc-500">Two</p>
+            <p class="mt-2 font-medium">App grants repo scope</p>
+          </div>
+          <div class="rounded-3xl border border-zinc-800 bg-zinc-950/60 p-4">
+            <p class="text-xs uppercase tracking-[0.2em] text-zinc-500">Three</p>
+            <p class="mt-2 font-medium">Builds persist as PRs</p>
+          </div>
+        </div>
+      </section>
+
+      <section>
+        <InstallGithubAppButton client:only="react" />
+      </section>
+    </div>
+
+    <section class="relative mx-auto mt-16 grid max-w-6xl gap-4 md:grid-cols-3">
+      <article class="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/50 p-6">
+        <h2 class="text-sm font-semibold uppercase tracking-[0.22em] text-emerald-200">
+          No PATs
+        </h2>
+        <p class="mt-3 text-sm leading-6 text-zinc-400">
+          Repo operations use short-lived installation tokens minted by the App.
+          OAuth never owns repo writes.
+        </p>
+      </article>
+      <article class="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/50 p-6">
+        <h2 class="text-sm font-semibold uppercase tracking-[0.22em] text-emerald-200">
+          Existing installs
+        </h2>
+        <p class="mt-3 text-sm leading-6 text-zinc-400">
+          The sync button reconciles your already-installed personal App
+          installation without depending on GitHub's post-install redirect.
+        </p>
+      </article>
+      <article class="rounded-[1.75rem] border border-zinc-800 bg-zinc-950/50 p-6">
+        <h2 class="text-sm font-semibold uppercase tracking-[0.22em] text-emerald-200">
+          Unique repo
+        </h2>
+        <p class="mt-3 text-sm leading-6 text-zinc-400">
+          Each project gets one active repo connection. Successful edits push a
+          branch and open a pull request against that repo.
+        </p>
+      </article>
     </section>
   </main>
 
@@ -75,24 +92,18 @@ import InstallGithubAppButton from "../../components/InstallGithubAppButton";
       if (!banner) return;
 
       const installation = params.get("installation");
-
-      /**
-       * Map the ?github= markers the Setup URL handler emits onto a
-       * human-readable banner. Keeping this mapping client-side (not in the
-       * URL) means we can iterate on copy without touching the backend.
-       */
       const variants = {
         installed: {
           tone: "success",
-          title: "GitHub App installed",
+          title: "GitHub App connected",
           body: installation
-            ? `Connected (installation ${installation.slice(0, 8)}…). You can now connect a repo to any project.`
-            : "You can now connect a repo to any project.",
+            ? `Synced installation ${installation.slice(0, 8)}. New successful builds will persist to GitHub.`
+            : "New successful builds will persist to GitHub.",
         },
         not_configured: {
           tone: "warn",
-          title: "GitHub App not configured on this server",
-          body: "The install completed on GitHub, but the server is missing App credentials so the installation was not mirrored locally. Ask an admin to wire GITHUB_APP_ID / private key / webhook secret.",
+          title: "GitHub App credentials missing",
+          body: "GitHub completed its side, but this deploy is missing App credentials. Add the env vars and sync again.",
         },
       };
 
@@ -100,18 +111,16 @@ import InstallGithubAppButton from "../../components/InstallGithubAppButton";
       if (!v) return;
 
       const styles = v.tone === "success"
-        ? "border-green-800 bg-green-950/30 text-green-300"
-        : "border-amber-800 bg-amber-950/30 text-amber-300";
+        ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100"
+        : "border-amber-300/20 bg-amber-300/10 text-amber-100";
 
-      banner.className = `mb-8 w-full rounded-lg border px-4 py-3 ${styles}`;
+      banner.className = `rounded-3xl border px-5 py-4 ${styles}`;
       banner.innerHTML = `
         <p class="text-sm font-semibold">${v.title}</p>
-        <p class="mt-1 text-xs opacity-90">${v.body}</p>
+        <p class="mt-1 text-sm opacity-80">${v.body}</p>
       `;
       banner.classList.remove("hidden");
 
-      // Strip the markers from the address bar so a back-forward-reload
-      // doesn't re-show the banner. History replace keeps the scroll pos.
       const clean = new URL(window.location.href);
       clean.searchParams.delete("github");
       clean.searchParams.delete("installation");

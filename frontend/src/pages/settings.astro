@@ -1,0 +1,88 @@
+---
+import Base from "../layouts/Base.astro";
+import InstallGithubAppButton from "../components/InstallGithubAppButton";
+---
+<Base title="Settings" noindex={true}>
+  <main class="min-h-[calc(100vh-4rem)] bg-[#060709] px-6 py-12 text-zinc-100">
+    <div class="mx-auto max-w-6xl">
+      <div class="mb-10 flex flex-col justify-between gap-6 border-b border-zinc-800 pb-8 md:flex-row md:items-end">
+        <div>
+          <p class="text-xs font-semibold uppercase tracking-[0.28em] text-emerald-300">
+            Profile
+          </p>
+          <h1 class="mt-3 text-4xl font-semibold tracking-[-0.05em] text-zinc-50">
+            Settings & connections
+          </h1>
+          <p class="mt-3 max-w-2xl text-sm leading-6 text-zinc-400">
+            Manage the identity Stem Cell uses for sign-in and the GitHub App
+            installation that owns repository persistence.
+          </p>
+        </div>
+        <a
+          href="/"
+          class="inline-flex items-center justify-center rounded-2xl border border-zinc-700 bg-zinc-950 px-4 py-2.5 text-sm font-semibold text-zinc-200 transition hover:border-zinc-500 hover:bg-zinc-900"
+        >
+          Back to builder
+        </a>
+      </div>
+
+      <div class="grid gap-6 lg:grid-cols-[0.7fr_1.3fr]">
+        <aside class="space-y-4">
+          <section class="rounded-4xl border border-zinc-800 bg-zinc-950/70 p-6">
+            <p class="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">
+              Signed in as
+            </p>
+            <div id="account-card" class="mt-4 space-y-3">
+              <div class="h-5 w-48 animate-pulse rounded bg-zinc-800"></div>
+              <div class="h-4 w-24 animate-pulse rounded bg-zinc-900"></div>
+            </div>
+          </section>
+
+          <section class="rounded-4xl border border-zinc-800 bg-zinc-950/70 p-6">
+            <p class="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">
+              Persistence policy
+            </p>
+            <ul class="mt-4 space-y-3 text-sm leading-6 text-zinc-400">
+              <li>One active GitHub repo connection per Stem Cell project.</li>
+              <li>Successful AI edits push a branch, then open a PR.</li>
+              <li>GitHub App tokens are short-lived and never stored.</li>
+            </ul>
+          </section>
+        </aside>
+
+        <section>
+          <InstallGithubAppButton client:only="react" returnTo="/settings" />
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script is:inline>
+    (() => {
+      const card = document.getElementById("account-card");
+      if (!card) return;
+
+      fetch("/auth/me", { credentials: "same-origin" })
+        .then((res) => {
+          if (!res.ok) throw new Error("not signed in");
+          return res.json();
+        })
+        .then((data) => {
+          const account = data.account || {};
+          card.innerHTML = `
+            <p class="text-lg font-semibold text-zinc-100">${account.email ?? "Unknown account"}</p>
+            <div class="flex flex-wrap gap-2 text-xs">
+              <span class="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-zinc-300">${account.role ?? "user"}</span>
+              <span class="rounded-full border border-zinc-700 bg-zinc-900 px-3 py-1 text-zinc-300">${account.email_verified ? "verified" : "unverified"}</span>
+            </div>
+          `;
+        })
+        .catch(() => {
+          card.innerHTML = `
+            <p class="text-sm text-zinc-400">You are not signed in.</p>
+            <a href="/login?next=/settings" class="mt-3 inline-flex rounded-2xl bg-emerald-300 px-4 py-2 text-sm font-semibold text-zinc-950">Sign in</a>
+          `;
+        });
+    })();
+  </script>
+</Base>

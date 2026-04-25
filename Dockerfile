@@ -54,12 +54,14 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/stem-cell ./server
-COPY --from=builder /app/public/ ./public/
+# Frontend assets are baked into the binary via `rust-embed` (embed-assets
+# feature, default on). Unset SERVE_DIR below to keep the embedded fallback;
+# set SERVE_DIR=/path/to/public at runtime to override with an on-disk tree.
 
 RUN mkdir -p /app/data && chown -R app:app /app /home/app
 USER app
 
-ENV SERVE_DIR=public PORT=4200 \
+ENV PORT=4200 \
     RUST_LOG=stem_cell=info,tower_http=info
 EXPOSE 4200
 

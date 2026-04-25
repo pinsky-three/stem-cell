@@ -499,7 +499,8 @@ impl RunBuildSystem for super::AppSystems {
 
         // ── Load project ──────────────────────────────────────
         let project_row = sqlx::query(
-            "SELECT id, slug, org_id, scope FROM projects WHERE id = $1 AND deleted_at IS NULL",
+            "SELECT id, name, slug, org_id, creator_id, scope \
+             FROM projects WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(project_id)
         .fetch_optional(pool)
@@ -507,7 +508,10 @@ impl RunBuildSystem for super::AppSystems {
         .map_err(|e: sqlx::Error| RunBuildError::BuildFailed(e.to_string()))?
         .ok_or(RunBuildError::ProjectNotFound)?;
 
+        let project_name: String = project_row.get("name");
+        let project_slug: String = project_row.get("slug");
         let org_id: uuid::Uuid = project_row.get("org_id");
+        let creator_id: uuid::Uuid = project_row.get("creator_id");
         let project_scope: String = project_row.get("scope");
         let started = std::time::Instant::now();
 
@@ -1469,6 +1473,34 @@ impl RunBuildSystem for super::AppSystems {
             );
         }
 
+        // ── Persist edited snapshot to GitHub (best-effort) ─────────────
+        //
+        // The preview checkout contains host-only mutations (dynamic PORT,
+        // dev-script patching, dependency install side effects). Instead of
+        // committing that whole working tree, build a clean temporary checkout
+        // from HEAD and copy only the paths OpenCode reported in its diff.
+        // That gives GitHub the user's edited project without leaking runtime
+        // scaffolding into their repo.
+        if model != "opencode-repair" && artifacts_count > 0 {
+            let path_strs: Vec<&str> = diffs
+                .iter()
+                .map(|d| d.path.as_str())
+                .filter(|p| !p.trim().is_empty())
+                .collect();
+            persist_github_snapshot_after_build(GithubPersistenceContext {
+                pool,
+                project_id,
+                project_name: project_name.as_str(),
+                project_slug: project_slug.as_str(),
+                org_id,
+                creator_id,
+                build_id,
+                work_dir: &work_dir,
+                changed_paths: &path_strs,
+            })
+            .await;
+        }
+
         // ── Record usage ──────────────────────────────────────
         sqlx::query(
             "INSERT INTO usage_records \
@@ -1620,6 +1652,476 @@ async fn publish_event(project_id: uuid::Uuid, event: BuildEvent) {
     let readers = bus.read().await;
     if let Some(tx) = readers.get(&project_id) {
         let _ = tx.send(event);
+    }
+}
+
+// ── GitHub persistence ────────────────────────────────────────────────
+
+struct ActiveGithubInstallation {
+    id: uuid::Uuid,
+    account_login: String,
+}
+
+struct GithubPersistenceContext<'a> {
+    pool: &'a sqlx::PgPool,
+    project_id: uuid::Uuid,
+    project_name: &'a str,
+    project_slug: &'a str,
+    org_id: uuid::Uuid,
+    creator_id: uuid::Uuid,
+    build_id: uuid::Uuid,
+    work_dir: &'a std::path::Path,
+    changed_paths: &'a [&'a str],
+}
+
+/// Best-effort persistence after OpenCode has produced real diffs.
+///
+/// This intentionally never fails the user-facing build: GitHub persistence is
+/// an important side effect, but losing the chat/build result because GitHub is
+/// temporarily unavailable would be worse. Operators get a structured warning
+/// with the project/build ids and the underlying error.
+async fn persist_github_snapshot_after_build(ctx: GithubPersistenceContext<'_>) {
+    if ctx.changed_paths.is_empty() {
+        let project_id = ctx.project_id;
+        let build_id = ctx.build_id;
+        tracing::debug!(%project_id, %build_id, "skip GitHub persistence — no changed paths");
+        return;
+    }
+
+    let default_branch = match ensure_github_repo_connection(
+        ctx.pool,
+        ctx.project_id,
+        ctx.project_name,
+        ctx.project_slug,
+        ctx.org_id,
+        ctx.creator_id,
+    )
+    .await
+    {
+        Ok(Some(default_branch)) => default_branch,
+        Ok(None) => {
+            let project_id = ctx.project_id;
+            let build_id = ctx.build_id;
+            tracing::info!(
+                %project_id,
+                %build_id,
+                "skip GitHub persistence — no active GitHub installation for this project/org"
+            );
+            return;
+        }
+        Err(e) => {
+            let project_id = ctx.project_id;
+            let build_id = ctx.build_id;
+            tracing::warn!(%project_id, %build_id, error = %e, "GitHub repo connection failed");
+            return;
+        }
+    };
+
+    let push_dir = match prepare_github_push_checkout(ctx.work_dir, ctx.build_id, ctx.changed_paths)
+        .await
+    {
+        Ok(dir) => dir,
+        Err(e) => {
+            let project_id = ctx.project_id;
+            let build_id = ctx.build_id;
+            tracing::warn!(%project_id, %build_id, error = %e, "GitHub persistence checkout prep failed");
+            return;
+        }
+    };
+
+    let branch_name = format!(
+        "stem-cell/{}/{}",
+        sanitize_branch_component(ctx.project_slug)
+            .chars()
+            .take(48)
+            .collect::<String>(),
+        &ctx.build_id.to_string()[..8],
+    );
+    let commit_message = format!("Persist Stem Cell build {}", &ctx.build_id.to_string()[..8]);
+
+    let push_input = PushProjectChangesToRepoInput {
+        project_id: ctx.project_id,
+        branch_name: branch_name.clone(),
+        commit_message,
+        source_dir: push_dir.display().to_string(),
+        force: Some(false),
+    };
+
+    let pushed = <super::AppSystems as PushProjectChangesToRepoSystem>::execute(
+        &super::AppSystems,
+        ctx.pool,
+        push_input,
+    )
+    .await;
+
+    match pushed {
+        Ok(out) => {
+            let project_id = ctx.project_id;
+            let build_id = ctx.build_id;
+            tracing::info!(
+                %project_id,
+                %build_id,
+                branch = %branch_name,
+                commit_sha = %out.commit_sha,
+                "GitHub persistence push completed"
+            );
+            open_github_persistence_pr(
+                ctx.pool,
+                ctx.project_id,
+                ctx.project_name,
+                ctx.build_id,
+                &branch_name,
+            )
+            .await;
+        }
+        Err(e) => {
+            let project_id = ctx.project_id;
+            let build_id = ctx.build_id;
+            tracing::warn!(
+                %project_id,
+                %build_id,
+                branch = %branch_name,
+                error = ?e,
+                "GitHub persistence push failed"
+            );
+        }
+    }
+
+    if let Err(e) = tokio::fs::remove_dir_all(&push_dir).await {
+        tracing::debug!(path = %push_dir.display(), error = %e, "cleanup GitHub persistence checkout failed");
+    }
+
+    tracing::debug!(
+        project_id = %ctx.project_id,
+        build_id = %ctx.build_id,
+        %default_branch,
+        "GitHub persistence flow finished"
+    );
+}
+
+async fn ensure_github_repo_connection(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+    project_name: &str,
+    project_slug: &str,
+    org_id: uuid::Uuid,
+    creator_id: uuid::Uuid,
+) -> Result<Option<String>, String> {
+    if let Some(branch) = active_repo_default_branch(pool, project_id).await? {
+        return Ok(Some(branch));
+    }
+
+    let Some(installation) =
+        active_github_installation_for_project(pool, org_id, creator_id).await?
+    else {
+        return Ok(None);
+    };
+
+    let (template_owner, template_repo) = github_template_owner_repo();
+    let repo_name = github_repo_name_from_slug(project_slug);
+    let private = github_repos_private_default();
+    let description = format!("Stem Cell project: {project_name}");
+
+    let input = CreateRepoFromTemplateInput {
+        project_id,
+        github_installation_id: installation.id,
+        template_owner,
+        template_repo,
+        new_owner: installation.account_login,
+        new_name: repo_name,
+        description: Some(description),
+        private: Some(private),
+        include_all_branches: Some(false),
+    };
+
+    let out = <super::AppSystems as CreateRepoFromTemplateSystem>::execute(
+        &super::AppSystems,
+        pool,
+        input,
+    )
+    .await
+    .map_err(|e| format!("{e:?}"))?;
+
+    Ok(Some(out.default_branch))
+}
+
+async fn active_repo_default_branch(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+) -> Result<Option<String>, String> {
+    let row = sqlx::query(
+        "SELECT default_branch FROM repo_connections \
+         WHERE project_id = $1 AND active = true AND status = 'connected' \
+           AND deleted_at IS NULL \
+         ORDER BY updated_at DESC LIMIT 1",
+    )
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(row.map(|r| r.get("default_branch")))
+}
+
+async fn active_github_installation_for_project(
+    pool: &sqlx::PgPool,
+    org_id: uuid::Uuid,
+    creator_id: uuid::Uuid,
+) -> Result<Option<ActiveGithubInstallation>, String> {
+    let row = sqlx::query(
+        "SELECT id, account_login FROM github_installations \
+         WHERE org_id = $1 AND active = true AND status = 'active' \
+           AND deleted_at IS NULL \
+           AND (installer_user_id = $2 OR installer_user_id IS NULL) \
+         ORDER BY (installer_user_id IS NULL) ASC, updated_at DESC \
+         LIMIT 1",
+    )
+    .bind(org_id)
+    .bind(creator_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(row.map(|r| ActiveGithubInstallation {
+        id: r.get("id"),
+        account_login: r.get("account_login"),
+    }))
+}
+
+fn github_template_owner_repo() -> (String, String) {
+    match (
+        std::env::var("STEM_CELL_GITHUB_TEMPLATE_OWNER").ok(),
+        std::env::var("STEM_CELL_GITHUB_TEMPLATE_REPO").ok(),
+    ) {
+        (Some(owner), Some(repo)) if !owner.trim().is_empty() && !repo.trim().is_empty() => {
+            (owner, repo)
+        }
+        _ => parse_github_owner_repo(stem_projects::DEFAULT_TEMPLATE_URL)
+            .unwrap_or_else(|| ("pinsky-three".into(), "stem-cell-shrank".into())),
+    }
+}
+
+fn parse_github_owner_repo(url: &str) -> Option<(String, String)> {
+    let trimmed = url.trim().trim_end_matches(".git");
+    let path = trimmed
+        .strip_prefix("https://github.com/")
+        .or_else(|| trimmed.strip_prefix("git@github.com:"))?;
+    let mut parts = path.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+fn github_repo_name_from_slug(slug: &str) -> String {
+    let sanitized = slug
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['-', '.', '_'])
+        .chars()
+        .take(90)
+        .collect::<String>();
+
+    if sanitized.is_empty() {
+        format!("stem-cell-{}", chrono::Utc::now().timestamp())
+    } else {
+        sanitized
+    }
+}
+
+fn github_repos_private_default() -> bool {
+    std::env::var("STEM_CELL_GITHUB_REPOS_PRIVATE")
+        .ok()
+        .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+        .unwrap_or(true)
+}
+
+async fn prepare_github_push_checkout(
+    work_dir: &std::path::Path,
+    build_id: uuid::Uuid,
+    changed_paths: &[&str],
+) -> Result<std::path::PathBuf, String> {
+    if !work_dir.join(".git").exists() {
+        return Err(format!(
+            "work_dir is not a git checkout: {}",
+            work_dir.display()
+        ));
+    }
+
+    let push_dir = std::env::temp_dir().join(format!("stem-cell-github-push-{build_id}"));
+    if tokio::fs::try_exists(&push_dir).await.unwrap_or(false) {
+        tokio::fs::remove_dir_all(&push_dir)
+            .await
+            .map_err(|e| format!("remove old {}: {e}", push_dir.display()))?;
+    }
+
+    run_git_command(
+        work_dir,
+        &[
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            work_dir.to_str().unwrap_or_default(),
+            push_dir.to_str().unwrap_or_default(),
+        ],
+    )
+    .await?;
+
+    for raw in changed_paths {
+        let Some(rel) = safe_relative_path(raw) else {
+            tracing::warn!(path = %raw, "skip unsafe changed path during GitHub persistence");
+            continue;
+        };
+        let src = work_dir.join(&rel);
+        let dst = push_dir.join(&rel);
+
+        if tokio::fs::try_exists(&src).await.unwrap_or(false) {
+            if let Some(parent) = dst.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+            }
+            tokio::fs::copy(&src, &dst)
+                .await
+                .map_err(|e| format!("copy {} -> {}: {e}", src.display(), dst.display()))?;
+        } else if tokio::fs::try_exists(&dst).await.unwrap_or(false) {
+            let meta = tokio::fs::metadata(&dst)
+                .await
+                .map_err(|e| format!("metadata {}: {e}", dst.display()))?;
+            if meta.is_dir() {
+                tokio::fs::remove_dir_all(&dst)
+                    .await
+                    .map_err(|e| format!("remove dir {}: {e}", dst.display()))?;
+            } else {
+                tokio::fs::remove_file(&dst)
+                    .await
+                    .map_err(|e| format!("remove file {}: {e}", dst.display()))?;
+            }
+        }
+    }
+
+    Ok(push_dir)
+}
+
+fn safe_relative_path(raw: &str) -> Option<std::path::PathBuf> {
+    use std::path::{Component, Path, PathBuf};
+
+    let p = Path::new(raw.trim());
+    if p.is_absolute() {
+        return None;
+    }
+
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    if out.as_os_str().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+async fn run_git_command(cwd: &std::path::Path, args: &[&str]) -> Result<(), String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .await
+        .map_err(|e| format!("git spawn: {e}"))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let tail: String = stderr
+        .chars()
+        .rev()
+        .take(1200)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    Err(format!("git {}: {tail}", args.join(" ")))
+}
+
+fn sanitize_branch_component(input: &str) -> String {
+    let s = input
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches(['-', '.', '_'])
+        .to_string();
+
+    if s.is_empty() { "project".into() } else { s }
+}
+
+async fn open_github_persistence_pr(
+    pool: &sqlx::PgPool,
+    project_id: uuid::Uuid,
+    project_name: &str,
+    build_id: uuid::Uuid,
+    branch_name: &str,
+) {
+    let title = format!(
+        "Stem Cell update: {}",
+        project_name.chars().take(72).collect::<String>()
+    );
+    let body = format!(
+        "Automated Stem Cell persistence for build `{}`.\n\nThis PR captures the files edited by OpenCode for project `{}`.",
+        build_id, project_id,
+    );
+
+    let input = OpenExperimentPullRequestInput {
+        project_id,
+        branch_name: branch_name.to_string(),
+        title,
+        body: Some(body),
+    };
+
+    match <super::AppSystems as OpenExperimentPullRequestSystem>::execute(
+        &super::AppSystems,
+        pool,
+        input,
+    )
+    .await
+    {
+        Ok(out) => tracing::info!(
+            %project_id,
+            %build_id,
+            pr_number = out.pr_number,
+            pr_url = %out.pr_url,
+            "GitHub persistence PR opened"
+        ),
+        Err(e) => tracing::warn!(
+            %project_id,
+            %build_id,
+            branch = %branch_name,
+            error = ?e,
+            "GitHub persistence PR could not be opened"
+        ),
     }
 }
 

@@ -101,6 +101,18 @@ fn main() {
     );
 
     if std::env::var("SKIP_FRONTEND").is_ok() {
+        // The `embed-assets` feature expands `rust_embed::RustEmbed` over
+        // `$CARGO_MANIFEST_DIR/../../public` at macro-expansion time. Ensure
+        // the directory exists (even empty) so `SKIP_FRONTEND=1 cargo check`
+        // keeps working on fresh clones that haven't built the frontend yet.
+        let public = workspace_root.join("public");
+        if !public.exists() {
+            fs::create_dir_all(&public).ok();
+            println!(
+                "cargo:warning=created empty {} for embed-assets macro",
+                public.display()
+            );
+        }
         println!("cargo:warning=SKIP_FRONTEND set — skipping frontend build");
         return;
     }

@@ -169,7 +169,7 @@ Then open:
 |---|---|---|---|
 | `DATABASE_URL` | yes | — | Postgres connection string |
 | `PORT` | no | `4200` | HTTP listen port |
-| `SERVE_DIR` | no | `public` | Static file directory |
+| `SERVE_DIR` | no | — | Escape hatch: serve the frontend from this on-disk directory instead of the copy baked into the binary. Set to `public` (or your HMR output) during dev; leave unset in production so the single-binary artifact serves its embedded assets. |
 | `RUST_LOG` | no | `stem_cell=info,tower_http=info` | Log filter |
 | `SKIP_FRONTEND` | no | — | Set to skip frontend build in `build.rs` (used in Docker & CI) |
 | `APP_URL` | no | `http://localhost:4200` | Public base URL |
@@ -283,7 +283,9 @@ docker run --rm -p 4200:4200 \
   stem-cell
 ```
 
-The image is a two-stage build (~100 MB final) using `debian:bookworm-slim`. It runs as a non-root `app` user with a healthcheck on `/`.
+The image is a two-stage build (~80 MB final) using `debian:bookworm-slim`. It runs as a non-root `app` user with a healthcheck on `/`.
+
+The frontend (`public/`) is compiled directly into the `stem-cell` binary via the default `embed-assets` Cargo feature (powered by [rust-embed](https://crates.io/crates/rust-embed)), so the release artifact is self-contained — no `public/` copy step, no `SERVE_DIR` required. To disable and fall back to on-disk `ServeDir`, build with `--no-default-features` or set `SERVE_DIR=/path/to/public` at runtime (useful for HMR in `mise run dev:full`).
 
 ## Defining your model
 

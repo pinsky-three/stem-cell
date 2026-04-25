@@ -139,3 +139,7 @@ run = "cargo run -q -p stem-cli -- clone"
 [tasks."fully-local:serve"]
 description = "Start fully-local server"
 run = "cargo +nightly run -p fully-local"
+
+[tasks."standalone:serve"]
+description = "Run standalone stem-cell server"
+run = "./target/release/stem-cell"

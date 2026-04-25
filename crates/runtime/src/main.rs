@@ -1,6 +1,8 @@
 use stem_cell::system_api;
 use stem_cell::{github_app, github_webhook, integrations, migrate, proxy, resource_api, systems};
 
+#[cfg(feature = "embed-assets")]
+mod assets;
 mod auth;
 mod email;
 mod events;
@@ -90,7 +92,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .expect("PORT must be a valid u16");
 
-    let serve_dir = std::env::var("SERVE_DIR").unwrap_or_else(|_| "public".into());
+    // Static-asset wiring.
+    //
+    // * `SERVE_DIR` set        → on-disk ServeDir (dev/HMR escape hatch).
+    // * feature `embed-assets` → serve from the rust-embed tree baked into
+    //                            the binary at compile time (default for the
+    //                            release artifact — produces a single binary).
+    // * neither                → on-disk ServeDir at ./public (back-compat).
+    let serve_dir_override = std::env::var("SERVE_DIR").ok();
+    #[cfg_attr(not(feature = "embed-assets"), allow(unused_variables))]
+    let use_embedded = cfg!(feature = "embed-assets") && serve_dir_override.is_none();
+    let serve_dir = serve_dir_override.unwrap_or_else(|| "public".into());
 
     // Generated CRUD API uses PgPool state — resolve it before merging
     let (api, openapi) = resource_api::router().split_for_parts();
@@ -175,21 +187,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .allow_headers(Any)
     };
 
-    // SPA fallback: /project/{uuid} → serve the static project page
+    // SPA fallback: /project/{uuid} → serve the static project page. When the
+    // `embed-assets` feature is on (and no SERVE_DIR override), pull the shell
+    // out of the embedded tree; otherwise fall back to reading it off disk so
+    // `mise run dev:full` picks up HMR-rebuilt HTML.
     let project_page = serve_dir.clone();
-    let spa_fallback = Router::new().route(
-        "/project/{id}",
-        get(move || async move {
-            let path = std::path::Path::new(&project_page).join("project/index.html");
-            match tokio::fs::read(path).await {
-                Ok(bytes) => (
-                    [(axum::http::header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")],
-                    axum::response::Html(bytes),
-                ).into_response(),
-                Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+    let spa_fallback = {
+        #[cfg(feature = "embed-assets")]
+        {
+            if use_embedded {
+                Router::new().route("/project/{id}", get(assets::serve_project_spa))
+            } else {
+                Router::new().route(
+                    "/project/{id}",
+                    get(move || async move { serve_project_from_disk(&project_page).await }),
+                )
             }
-        }),
-    );
+        }
+        #[cfg(not(feature = "embed-assets"))]
+        {
+            Router::new().route(
+                "/project/{id}",
+                get(move || async move { serve_project_from_disk(&project_page).await }),
+            )
+        }
+    };
 
     // ORDER MATTERS: axum's `Router::layer` only wraps routes (and the
     // fallback) that were added BEFORE the layer call. So the fallback
@@ -209,8 +231,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(r) = github_webhook_routes {
         app = app.merge(r);
     }
+
+    #[cfg(feature = "embed-assets")]
+    let app = if use_embedded {
+        tracing::info!(backend = "embedded", "static assets served from binary");
+        app.fallback(assets::serve)
+    } else {
+        tracing::info!(backend = "on_disk", dir = %serve_dir, "static assets served from filesystem");
+        app.fallback_service(ServeDir::new(&serve_dir))
+    };
+    #[cfg(not(feature = "embed-assets"))]
+    let app = {
+        tracing::info!(backend = "on_disk", dir = %serve_dir, "static assets served from filesystem");
+        app.fallback_service(ServeDir::new(&serve_dir))
+    };
+
     let app = app
-        .fallback_service(ServeDir::new(&serve_dir))
         // Global guard: enforces admin-only for /admin and /admin/*, and is a
         // pass-through for every other path. See auth::admin_guard for the
         // rationale (keeps ServeDir's trailing-slash redirect correct).
@@ -230,4 +266,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Legacy on-disk path for `/project/{id}`. Used when `SERVE_DIR` is set or
+/// the `embed-assets` feature is off — keeps HMR working in dev.
+async fn serve_project_from_disk(dir: &str) -> axum::response::Response {
+    let path = std::path::Path::new(dir).join("project/index.html");
+    match tokio::fs::read(path).await {
+        Ok(bytes) => (
+            [(
+                axum::http::header::CACHE_CONTROL,
+                "no-cache, no-store, must-revalidate",
+            )],
+            axum::response::Html(bytes),
+        )
+            .into_response(),
+        Err(_) => axum::http::StatusCode::NOT_FOUND.into_response(),
+    }
 }

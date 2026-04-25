@@ -3,7 +3,16 @@ name = "stem-cell"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# Bundle the built frontend (public/) into the binary so the release artifact
+# is self-contained. Disable to fall back to on-disk ServeDir (zero data impact,
+# no migration).
+default = ["embed-assets"]
+embed-assets = ["dep:rust-embed", "dep:mime_guess"]
+
 [dependencies]
+rust-embed = { version = "8", optional = true, features = ["compression", "interpolate-folder-path"] }
+mime_guess = { version = "2", optional = true }
 resource-model-macro = { path = "../../crates/resource-model-macro" }
 system-model-macro = { path = "../../crates/system-model-macro" }
 opencode-client = { path = "../../crates/opencode-client" }

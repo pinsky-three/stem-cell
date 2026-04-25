@@ -1,3 +1,11 @@
+
+
+<img width="2172" height="724" alt="ba71e173-1354-47dd-b5e0-69ab3c13a4ea" src="https://github.com/user-attachments/assets/f2b22001-75fc-460f-9332-8b2f5e154034" />
+
+
+
+
+---
 # Stem Cell
 
 A spec-driven platform for building AI app-builders. Define your data model and business workflows in two YAML files and get a Postgres-backed REST API, reverse proxy, container orchestration, and an admin UI — no boilerplate.

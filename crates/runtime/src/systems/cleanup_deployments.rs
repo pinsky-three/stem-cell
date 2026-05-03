@@ -1,9 +1,9 @@
 use crate::system_api::*;
 use std::time::Duration;
+use stem_sandbox::{SandboxId, SandboxRoot};
 use tracing::Instrument;
 
 const DEFAULT_MAX_AGE_MINUTES: i32 = 60;
-const KILL_GRACE: Duration = Duration::from_secs(5);
 const PERIODIC_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(sqlx::FromRow)]
@@ -251,7 +251,12 @@ async fn periodic_loop(pool: sqlx::PgPool) {
         if errors.is_empty() {
             tracing::info!(cleaned, total, "periodic cleanup complete");
         } else {
-            tracing::warn!(cleaned, total, error_count = errors.len(), "periodic cleanup finished with errors");
+            tracing::warn!(
+                cleaned,
+                total,
+                error_count = errors.len(),
+                "periodic cleanup finished with errors"
+            );
         }
     }
 }
@@ -282,8 +287,9 @@ async fn cleanup_one(pool: &sqlx::PgPool, dep: &DeploymentRow) -> Result<(), Str
         kill_process(pid).await;
     }
 
-    let work_dir = format!("/tmp/stem-cell-{}", dep.build_job_id);
-    remove_work_dir(&work_dir).await;
+    let root = SandboxRoot::temp_default();
+    let work_dir = root.work_dir(&SandboxId::from_uuid(dep.build_job_id));
+    remove_work_dir(&root, &work_dir).await;
 
     sqlx::query(
         "UPDATE deployments SET status = 'cleaned', active = false, updated_at = NOW() \
@@ -335,7 +341,10 @@ async fn fetch_targets(
     }
 }
 
-async fn fetch_stale(pool: &sqlx::PgPool, max_age_minutes: i32) -> Result<Vec<DeploymentRow>, String> {
+async fn fetch_stale(
+    pool: &sqlx::PgPool,
+    max_age_minutes: i32,
+) -> Result<Vec<DeploymentRow>, String> {
     sqlx::query_as::<_, DeploymentRow>(
         "SELECT id, build_job_id, pid FROM deployments \
          WHERE active = true AND deleted_at IS NULL \
@@ -352,48 +361,15 @@ async fn fetch_stale(pool: &sqlx::PgPool, max_age_minutes: i32) -> Result<Vec<De
 
 /// Best-effort SIGTERM then SIGKILL (process group + direct). Used by cleanup and deploy restart.
 pub(crate) async fn kill_process(pid: i32) {
-    #[cfg(unix)]
-    {
-        use std::process::Command;
-
-        let pgid_kill = Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .output();
-        let direct_kill = Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output();
-
-        if pgid_kill.is_err() && direct_kill.is_err() {
-            tracing::debug!(pid, "SIGTERM failed — process may already be gone");
-            return;
-        }
-
-        tokio::time::sleep(KILL_GRACE).await;
-
-        let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .output();
-        let _ = Command::new("kill")
-            .args(["-KILL", &pid.to_string()])
-            .output();
-
-        tracing::debug!(pid, "kill sequence complete");
-    }
-
-    #[cfg(not(unix))]
-    {
-        tracing::warn!(pid, "process kill not supported on this platform");
-    }
+    stem_sandbox::kill_process_tree(pid).await;
+    tracing::debug!(pid, "kill sequence complete");
 }
 
-async fn remove_work_dir(path: &str) {
-    match tokio::fs::remove_dir_all(path).await {
-        Ok(()) => tracing::info!(%path, "removed work directory"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            tracing::debug!(%path, "work directory already gone");
-        }
+async fn remove_work_dir(root: &SandboxRoot, path: &std::path::Path) {
+    match stem_sandbox::remove_sandbox_dir(root, path).await {
+        Ok(()) => tracing::info!(path = %path.display(), "removed work directory"),
         Err(e) => {
-            tracing::warn!(%path, error = %e, "failed to remove work directory");
+            tracing::warn!(path = %path.display(), error = %e, "failed to remove work directory");
         }
     }
 }

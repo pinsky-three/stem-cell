@@ -1,11 +1,12 @@
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::Json;
 use axum_extra::extract::CookieJar;
 use axum_extra::extract::cookie::Cookie;
 use serde::Deserialize;
 
+use super::AppState;
 use super::middleware::CurrentAccount;
 use super::models::{
     AccountPublic, AuthResponse, ForgotPasswordRequest, LoginRequest, RegisterRequest,
@@ -13,7 +14,6 @@ use super::models::{
 };
 use super::password;
 use super::repository;
-use super::AppState;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
@@ -136,8 +136,8 @@ pub async fn login(
         .as_deref()
         .ok_or(AuthError::InvalidCredentials)?;
 
-    let valid =
-        password::verify_password(&body.password, hash).map_err(|_| AuthError::InvalidCredentials)?;
+    let valid = password::verify_password(&body.password, hash)
+        .map_err(|_| AuthError::InvalidCredentials)?;
 
     if !valid {
         return Err(AuthError::InvalidCredentials);
@@ -163,10 +163,7 @@ pub async fn login(
 
 // ── POST /auth/logout ───────────────────────────────────────────────────
 
-pub async fn logout(
-    State(state): State<AppState>,
-    jar: CookieJar,
-) -> Result<CookieJar, AuthError> {
+pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> Result<CookieJar, AuthError> {
     if let Some(cookie) = jar.get("session_token") {
         let _ = repository::delete_session(&state.pool, cookie.value()).await;
     }

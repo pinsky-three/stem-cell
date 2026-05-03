@@ -1,0 +1,18 @@
+[package]
+name = "stem-sandbox"
+version = "0.1.0"
+edition = "2024"
+description = "Shared sandbox workspace and process orchestration primitives for Stem Cell."
+
+[dependencies]
+stem-projects = { path = "../stem-projects" }
+stem-git = { path = "../stem-git" }
+tokio = { version = "1", features = ["process", "fs", "net", "time", "macros"] }
+tracing = "0.1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full"] }

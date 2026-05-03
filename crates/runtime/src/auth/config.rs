@@ -104,8 +104,7 @@ impl SmtpConfig {
                 .expect("SMTP_PORT must be a valid u16"),
             username: std::env::var("SMTP_USERNAME").unwrap_or_default(),
             password: std::env::var("SMTP_PASSWORD").unwrap_or_default(),
-            from: std::env::var("SMTP_FROM")
-                .unwrap_or_else(|_| "noreply@example.com".to_string()),
+            from: std::env::var("SMTP_FROM").unwrap_or_else(|_| "noreply@example.com".to_string()),
         })
     }
 }

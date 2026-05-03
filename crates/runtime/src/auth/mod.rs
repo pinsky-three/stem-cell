@@ -9,9 +9,9 @@ pub mod routes;
 
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::FromRef;
 use axum::routing::{get, post};
-use axum::Router;
 
 use crate::email::EmailService;
 use config::AuthConfig;

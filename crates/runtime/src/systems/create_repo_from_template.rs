@@ -11,9 +11,11 @@
 //!
 //! `include_all_branches` defaults to false (single-branch template copy).
 //! `private` defaults to true — safer default for user projects.
-use crate::github_app::{InstallationClient, config};
 use crate::system_api::*;
 use sqlx::Row;
+use stem_git::github::{
+    CreateRepoFromTemplateRequest, InstallationClient, config, create_repo_from_template,
+};
 
 #[async_trait::async_trait]
 impl CreateRepoFromTemplateSystem for super::AppSystems {
@@ -23,13 +25,12 @@ impl CreateRepoFromTemplateSystem for super::AppSystems {
         input: CreateRepoFromTemplateInput,
     ) -> Result<CreateRepoFromTemplateOutput, CreateRepoFromTemplateError> {
         // ── Validate project + installation ─────────────────────────────
-        let project_row = sqlx::query(
-            "SELECT active FROM projects WHERE id = $1 AND deleted_at IS NULL",
-        )
-        .bind(input.project_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| CreateRepoFromTemplateError::DatabaseError(e.to_string()))?;
+        let project_row =
+            sqlx::query("SELECT active FROM projects WHERE id = $1 AND deleted_at IS NULL")
+                .bind(input.project_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| CreateRepoFromTemplateError::DatabaseError(e.to_string()))?;
         let project_row = project_row.ok_or(CreateRepoFromTemplateError::ProjectNotFound)?;
         let project_active: bool = project_row.get("active");
         if !project_active {
@@ -65,55 +66,25 @@ impl CreateRepoFromTemplateSystem for super::AppSystems {
         let client = InstallationClient::for_installation(installation_id_remote)
             .await
             .map_err(|e| CreateRepoFromTemplateError::GithubApiError(e.to_string()))?;
+        let created = create_repo_from_template(
+            &client,
+            CreateRepoFromTemplateRequest {
+                template_owner: input.template_owner,
+                template_repo: input.template_repo,
+                new_owner: input.new_owner,
+                new_name: input.new_name,
+                description: input.description,
+                private: input.private.unwrap_or(true),
+                include_all_branches: input.include_all_branches.unwrap_or(false),
+            },
+        )
+        .await
+        .map_err(|e| CreateRepoFromTemplateError::GithubApiError(e.to_string()))?;
 
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/generate",
-            input.template_owner, input.template_repo
-        );
-        let mut body = serde_json::json!({
-            "owner": input.new_owner,
-            "name":  input.new_name,
-            "private": input.private.unwrap_or(true),
-            "include_all_branches": input.include_all_branches.unwrap_or(false),
-        });
-        if let Some(desc) = input.description.as_deref().filter(|s| !s.is_empty()) {
-            body["description"] = serde_json::Value::String(desc.into());
-        }
-
-        let res = client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CreateRepoFromTemplateError::GithubApiError(e.to_string()))?;
-        let status = res.status();
-        let response_body: serde_json::Value = res
-            .json()
-            .await
-            .map_err(|e| CreateRepoFromTemplateError::GithubApiError(e.to_string()))?;
-
-        if !status.is_success() {
-            return Err(CreateRepoFromTemplateError::GithubApiError(format!(
-                "POST {url}: {status} {response_body}"
-            )));
-        }
-
-        let owner = response_body["owner"]["login"]
-            .as_str()
-            .unwrap_or(&input.new_owner)
-            .to_string();
-        let repo = response_body["name"]
-            .as_str()
-            .unwrap_or(&input.new_name)
-            .to_string();
-        let default_branch = response_body["default_branch"]
-            .as_str()
-            .unwrap_or("main")
-            .to_string();
-        let html_url = response_body["html_url"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let owner = created.owner;
+        let repo = created.repo;
+        let default_branch = created.default_branch;
+        let html_url = created.html_url;
 
         // ── Upsert RepoConnection ───────────────────────────────────────
         let mut tx = pool

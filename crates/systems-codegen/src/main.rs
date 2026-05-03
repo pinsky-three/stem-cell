@@ -6,7 +6,10 @@ use std::{fs, io::Write};
 // ── CLI ─────────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "systems-codegen", about = "Materialize impl stubs and test scaffolds from systems.yaml")]
+#[command(
+    name = "systems-codegen",
+    about = "Materialize impl stubs and test scaffolds from systems.yaml"
+)]
 struct Cli {
     /// Path to systems.yaml
     #[arg(long, default_value = "specs/systems.yaml")]
@@ -166,7 +169,8 @@ fn write_if_allowed(path: &Path, content: &str, force: bool) -> bool {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).ok();
     }
-    let mut f = fs::File::create(path).unwrap_or_else(|e| panic!("cannot create {}: {e}", path.display()));
+    let mut f =
+        fs::File::create(path).unwrap_or_else(|e| panic!("cannot create {}: {e}", path.display()));
     f.write_all(content.as_bytes()).unwrap();
     eprintln!("  wrote: {}", path.display());
     true
@@ -211,7 +215,13 @@ fn main() {
     }
 
     eprintln!("\n=== Contract tests ===");
-    generate_contract_tests(&contract_systems, &spec.integrations, &tests_dir, &cli.crate_name, cli.force);
+    generate_contract_tests(
+        &contract_systems,
+        &spec.integrations,
+        &tests_dir,
+        &cli.crate_name,
+        cli.force,
+    );
 
     eprintln!("\n=== Systems module registry ===");
     generate_systems_mod(&contract_systems, &src_dir, cli.force);
@@ -221,12 +231,7 @@ fn main() {
 
 // ── System stubs ────────────────────────────────────────────────────────
 
-fn generate_system_stubs(
-    systems: &[&SystemDef],
-    src_dir: &Path,
-    _crate_name: &str,
-    force: bool,
-) {
+fn generate_system_stubs(systems: &[&SystemDef], src_dir: &Path, _crate_name: &str, force: bool) {
     let systems_dir = src_dir.join("systems");
 
     for system in systems {
@@ -551,11 +556,7 @@ fn {test_name}() {{
 
 // ── Systems module registry ─────────────────────────────────────────────
 
-fn generate_systems_mod(
-    systems: &[&SystemDef],
-    src_dir: &Path,
-    force: bool,
-) {
+fn generate_systems_mod(systems: &[&SystemDef], src_dir: &Path, force: bool) {
     if systems.is_empty() {
         return;
     }

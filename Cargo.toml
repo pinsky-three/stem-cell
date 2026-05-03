@@ -7,6 +7,8 @@ members = [
     "crates/opencode-client",
     "crates/runtime",
     "crates/stem-cli",
+    "crates/stem-git",
     "crates/stem-projects",
+    "crates/stem-sandbox",
     "crates/fully-local",
 ]

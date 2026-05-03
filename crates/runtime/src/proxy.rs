@@ -17,9 +17,7 @@ pub fn router(pool: PgPool) -> Router {
         .with_state(pool)
 }
 
-async fn proxy_no_slash(
-    Path(deployment_id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
+async fn proxy_no_slash(Path(deployment_id): Path<uuid::Uuid>) -> impl IntoResponse {
     axum::response::Redirect::permanent(&format!("/env/{deployment_id}/"))
 }
 
@@ -39,12 +37,7 @@ async fn proxy_handler(
     do_proxy(deployment_id, &rest, &pool, req).await
 }
 
-async fn do_proxy(
-    deployment_id: uuid::Uuid,
-    path: &str,
-    pool: &PgPool,
-    req: Request,
-) -> Response {
+async fn do_proxy(deployment_id: uuid::Uuid, path: &str, pool: &PgPool, req: Request) -> Response {
     let row = sqlx::query_as::<_, (i32, bool)>(
         "SELECT port, active FROM deployments WHERE id = $1 LIMIT 1",
     )
@@ -103,7 +96,8 @@ async fn do_proxy(
         }
     };
 
-    let status = StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let resp_headers = upstream.headers().clone();
     let body_bytes = match upstream.bytes().await {
         Ok(b) => b,
@@ -128,9 +122,9 @@ async fn do_proxy(
         response = response.header(key, value);
     }
 
-    response
-        .body(Body::from(final_body))
-        .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response())
+    response.body(Body::from(final_body)).unwrap_or_else(|_| {
+        (StatusCode::INTERNAL_SERVER_ERROR, "response build failed").into_response()
+    })
 }
 
 /// 502 response when the upstream dev server is temporarily unreachable.
@@ -252,9 +246,7 @@ fn upstream_unavailable_response(req_headers: &HeaderMap, err: &str) -> Response
         .header("content-type", "text/html; charset=utf-8")
         .header("cache-control", "no-store")
         .body(Body::from(html))
-        .unwrap_or_else(|_| {
-            (StatusCode::BAD_GATEWAY, format!("upstream: {err}")).into_response()
-        })
+        .unwrap_or_else(|_| (StatusCode::BAD_GATEWAY, format!("upstream: {err}")).into_response())
 }
 
 /// 410 Gone page served when the proxy deliberately refuses (deployment

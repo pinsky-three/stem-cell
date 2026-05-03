@@ -17,7 +17,6 @@ use crate::ProjectPath;
 use crate::error::{Error, Result};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tokio::process::Command;
 
 #[derive(Debug, Clone, Default)]
 pub struct CloneOpts {
@@ -41,11 +40,7 @@ pub struct CloneOpts {
 /// Idempotency is intentional: the runtime re-invokes this on every
 /// deploy so operators can retry safely, and the CLI's `stem init` does
 /// the same when resuming an interrupted scaffold.
-pub async fn clone_repo(
-    repo_url: &str,
-    dest: &Path,
-    opts: CloneOpts,
-) -> Result<ProjectPath> {
+pub async fn clone_repo(repo_url: &str, dest: &Path, opts: CloneOpts) -> Result<ProjectPath> {
     let dest = PathBuf::from(dest);
     let git_dir = dest.join(".git");
     let started = Instant::now();
@@ -67,50 +62,24 @@ pub async fn clone_repo(
         tokio::fs::create_dir_all(parent).await?;
     }
 
-    let mut cmd = Command::new("git");
-    cmd.arg("clone");
-    if opts.progress {
-        cmd.arg("--progress");
-    }
-    if let Some(ref branch) = opts.branch {
-        cmd.args(["--branch", branch, "--single-branch"]);
-    }
-    cmd.arg(repo_url);
-    cmd.arg(&dest);
-    // Silence the interactive credential prompt — if the token isn't in
-    // the URL (or the future GIT_ASKPASS hook), fail fast instead of
-    // blocking a server-side process on stdin.
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-
     tracing::info!(
         repo_url = %repo_url,
         dest = %dest.display(),
         "subprocess: clone and toolchain install"
     );
 
-    let output = cmd.output().await.map_err(|e| {
-        Error::CloneFailed(format!("failed to spawn git: {e}"))
-    })?;
+    stem_git::clone_repository(
+        repo_url,
+        &dest,
+        stem_git::CloneOptions {
+            progress: opts.progress,
+            branch: opts.branch.clone(),
+        },
+    )
+    .await
+    .map_err(|e| Error::CloneFailed(e.to_string()))?;
 
     let elapsed_ms = started.elapsed().as_millis() as u64;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        tracing::error!(
-            repo_url = %repo_url,
-            dest = %dest.display(),
-            elapsed_ms,
-            status = ?output.status.code(),
-            stderr = %stderr,
-            "git clone failed"
-        );
-        return Err(Error::CloneFailed(format!(
-            "git clone {repo_url} -> {}: exit {:?}: {}",
-            dest.display(),
-            output.status.code(),
-            stderr.trim()
-        )));
-    }
 
     tracing::info!(
         repo_url = %repo_url,
@@ -158,10 +127,29 @@ mod tests {
         // Seed the bare repo via a throwaway work tree.
         let seed = ws.path().join("seed");
         run_ok(&["git", "init", seed.to_str().unwrap()]).await;
-        tokio::fs::write(seed.join("README.md"), "hello\n").await.unwrap();
+        tokio::fs::write(seed.join("README.md"), "hello\n")
+            .await
+            .unwrap();
         run_in(&seed, &["git", "add", "."]).await;
-        run_in(&seed, &["git", "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-m", "init"]).await;
-        run_in(&seed, &["git", "remote", "add", "origin", bare.to_str().unwrap()]).await;
+        run_in(
+            &seed,
+            &[
+                "git",
+                "-c",
+                "user.email=a@b",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-m",
+                "init",
+            ],
+        )
+        .await;
+        run_in(
+            &seed,
+            &["git", "remote", "add", "origin", bare.to_str().unwrap()],
+        )
+        .await;
         run_in(&seed, &["git", "push", "origin", "HEAD:refs/heads/main"]).await;
 
         let dest = ws.path().join("dst");
@@ -174,7 +162,7 @@ mod tests {
     }
 
     async fn run_ok(argv: &[&str]) {
-        let status = Command::new(argv[0])
+        let status = tokio::process::Command::new(argv[0])
             .args(&argv[1..])
             .status()
             .await
@@ -183,7 +171,7 @@ mod tests {
     }
 
     async fn run_in(cwd: &Path, argv: &[&str]) {
-        let status = Command::new(argv[0])
+        let status = tokio::process::Command::new(argv[0])
             .args(&argv[1..])
             .current_dir(cwd)
             .status()

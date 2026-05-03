@@ -6,8 +6,8 @@
 
 use crate::cli::CloneArgs;
 use anyhow::{Context, Result};
-use stem_projects::{CloneOpts, InstallOpts, clone_repo, install_toolchain};
 use std::path::PathBuf;
+use stem_projects::{CloneOpts, InstallOpts, clone_repo, install_toolchain};
 
 pub async fn run(args: CloneArgs) -> Result<()> {
     let dest = args
@@ -24,7 +24,11 @@ pub async fn run(args: CloneArgs) -> Result<()> {
         }
         println!(
             "  install: {}",
-            if args.install { format!("yes (port {})", args.port) } else { "no".to_string() }
+            if args.install {
+                format!("yes (port {})", args.port)
+            } else {
+                "no".to_string()
+            }
         );
         return Ok(());
     }

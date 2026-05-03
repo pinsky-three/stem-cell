@@ -41,10 +41,7 @@ pub async fn find_account_by_email(
         .await
 }
 
-pub async fn find_account_by_id(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<Account>, sqlx::Error> {
+pub async fn find_account_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Account>, sqlx::Error> {
     sqlx::query_as::<_, Account>("SELECT * FROM accounts WHERE id = $1")
         .bind(id)
         .fetch_optional(pool)
@@ -114,12 +111,10 @@ pub async fn find_valid_session(
     pool: &PgPool,
     token: &str,
 ) -> Result<Option<Session>, sqlx::Error> {
-    sqlx::query_as::<_, Session>(
-        "SELECT * FROM sessions WHERE token = $1 AND expires_at > now()",
-    )
-    .bind(token)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_as::<_, Session>("SELECT * FROM sessions WHERE token = $1 AND expires_at > now()")
+        .bind(token)
+        .fetch_optional(pool)
+        .await
 }
 
 pub async fn delete_session(pool: &PgPool, token: &str) -> Result<(), sqlx::Error> {

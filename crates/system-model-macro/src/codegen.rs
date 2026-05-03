@@ -100,7 +100,11 @@ fn yaml_value_to_assignment_tokens(value: &serde_yaml::Value) -> TokenStream {
 
 /// Integration + operation names → PascalCase composite: `PaymentProviderCreateCharge`.
 fn integration_op_pascal(integration: &str, operation: &str) -> String {
-    format!("{}{}", to_pascal_case(integration), to_pascal_case(operation))
+    format!(
+        "{}{}",
+        to_pascal_case(integration),
+        to_pascal_case(operation)
+    )
 }
 
 // ── Binding type tracking ───────────────────────────────────────────────
@@ -362,8 +366,7 @@ fn generate_systems_router(spec: &SystemsSpec) -> TokenStream {
         match system.mode {
             SystemMode::Generated => {
                 let result_type = format_ident!("{}Result", system.name);
-                let uses_integrations =
-                    has_integrations && steps_use_integration(&system.steps);
+                let uses_integrations = has_integrations && steps_use_integration(&system.steps);
                 let uses_events = steps_use_events(&system.steps);
 
                 let execute_args = {
@@ -387,9 +390,12 @@ fn generate_systems_router(spec: &SystemsSpec) -> TokenStream {
                     has_integrations,
                     has_contracts,
                 ));
-                route_registrations.push(
-                    router_route_registration(&route_path, &handler_name, has_integrations, has_contracts),
-                );
+                route_registrations.push(router_route_registration(
+                    &route_path,
+                    &handler_name,
+                    has_integrations,
+                    has_contracts,
+                ));
             }
             SystemMode::Contract => {
                 let output_type = format_ident!("{}Output", system.name);
@@ -408,9 +414,12 @@ fn generate_systems_router(spec: &SystemsSpec) -> TokenStream {
                     has_integrations,
                     has_contracts,
                 ));
-                route_registrations.push(
-                    router_route_registration(&route_path, &handler_name, has_integrations, has_contracts),
-                );
+                route_registrations.push(router_route_registration(
+                    &route_path,
+                    &handler_name,
+                    has_integrations,
+                    has_contracts,
+                ));
             }
         }
     }
@@ -493,66 +502,68 @@ fn generate_router_scaffold(
     handler_fns: &[TokenStream],
     route_registrations: &[TokenStream],
 ) -> TokenStream {
-    let (state_generics, state_fields, router_fn_generics, router_params, state_init) =
-        match (has_integrations, has_contracts) {
-            (true, true) => (
-                quote! { <I: IntegrationRegistry, S: SystemsRegistry> },
-                if any_uses_integrations {
-                    quote! { pub pool: sqlx::PgPool, pub integrations: I, pub systems: S, }
-                } else {
-                    quote! { pub pool: sqlx::PgPool, _integrations: std::marker::PhantomData<I>, pub systems: S, }
-                },
-                quote! { <I: IntegrationRegistry + Clone + 'static, S: SystemsRegistry + 'static> },
-                if any_uses_integrations {
-                    quote! { pool: sqlx::PgPool, integrations: I, systems: S }
-                } else {
-                    quote! { pool: sqlx::PgPool, systems: S }
-                },
-                if any_uses_integrations {
-                    quote! { SystemsState { pool, integrations, systems } }
-                } else {
-                    quote! { SystemsState { pool, _integrations: std::marker::PhantomData, systems } }
-                },
-            ),
-            (true, false) => {
-                let int_field = if any_uses_integrations {
-                    quote! { pub integrations: I, }
-                } else {
-                    quote! { _integrations: std::marker::PhantomData<I>, }
-                };
-                let int_param = if any_uses_integrations {
-                    quote! { pool: sqlx::PgPool, integrations: I }
-                } else {
-                    quote! { pool: sqlx::PgPool }
-                };
-                let int_init = if any_uses_integrations {
-                    quote! { SystemsState { pool, integrations } }
-                } else {
-                    quote! { SystemsState { pool, _integrations: std::marker::PhantomData } }
-                };
-                (
-                    quote! { <I: IntegrationRegistry> },
-                    quote! { pub pool: sqlx::PgPool, #int_field },
-                    quote! { <I: IntegrationRegistry + Clone + 'static> },
-                    int_param,
-                    int_init,
-                )
-            }
-            (false, true) => (
-                quote! { <S: SystemsRegistry> },
-                quote! { pub pool: sqlx::PgPool, pub systems: S, },
-                quote! { <S: SystemsRegistry + 'static> },
-                quote! { pool: sqlx::PgPool, systems: S },
-                quote! { SystemsState { pool, systems } },
-            ),
-            (false, false) => (
-                quote! {},
-                quote! { pub pool: sqlx::PgPool, },
-                quote! {},
-                quote! { pool: sqlx::PgPool },
-                quote! { SystemsState { pool } },
-            ),
-        };
+    let (state_generics, state_fields, router_fn_generics, router_params, state_init) = match (
+        has_integrations,
+        has_contracts,
+    ) {
+        (true, true) => (
+            quote! { <I: IntegrationRegistry, S: SystemsRegistry> },
+            if any_uses_integrations {
+                quote! { pub pool: sqlx::PgPool, pub integrations: I, pub systems: S, }
+            } else {
+                quote! { pub pool: sqlx::PgPool, _integrations: std::marker::PhantomData<I>, pub systems: S, }
+            },
+            quote! { <I: IntegrationRegistry + Clone + 'static, S: SystemsRegistry + 'static> },
+            if any_uses_integrations {
+                quote! { pool: sqlx::PgPool, integrations: I, systems: S }
+            } else {
+                quote! { pool: sqlx::PgPool, systems: S }
+            },
+            if any_uses_integrations {
+                quote! { SystemsState { pool, integrations, systems } }
+            } else {
+                quote! { SystemsState { pool, _integrations: std::marker::PhantomData, systems } }
+            },
+        ),
+        (true, false) => {
+            let int_field = if any_uses_integrations {
+                quote! { pub integrations: I, }
+            } else {
+                quote! { _integrations: std::marker::PhantomData<I>, }
+            };
+            let int_param = if any_uses_integrations {
+                quote! { pool: sqlx::PgPool, integrations: I }
+            } else {
+                quote! { pool: sqlx::PgPool }
+            };
+            let int_init = if any_uses_integrations {
+                quote! { SystemsState { pool, integrations } }
+            } else {
+                quote! { SystemsState { pool, _integrations: std::marker::PhantomData } }
+            };
+            (
+                quote! { <I: IntegrationRegistry> },
+                quote! { pub pool: sqlx::PgPool, #int_field },
+                quote! { <I: IntegrationRegistry + Clone + 'static> },
+                int_param,
+                int_init,
+            )
+        }
+        (false, true) => (
+            quote! { <S: SystemsRegistry> },
+            quote! { pub pool: sqlx::PgPool, pub systems: S, },
+            quote! { <S: SystemsRegistry + 'static> },
+            quote! { pool: sqlx::PgPool, systems: S },
+            quote! { SystemsState { pool, systems } },
+        ),
+        (false, false) => (
+            quote! {},
+            quote! { pub pool: sqlx::PgPool, },
+            quote! {},
+            quote! { pool: sqlx::PgPool },
+            quote! { SystemsState { pool } },
+        ),
+    };
 
     quote! {
         #[derive(Clone)]
@@ -652,11 +663,7 @@ fn generate_all_integrations(spec: &SystemsSpec) -> TokenStream {
             let composite = integration_op_pascal(&integration.name, &op.name);
             let input_name = format_ident!("{}Input", composite);
             let output_name = format_ident!("{}Output", composite);
-            let method_name = format_ident!(
-                "{}_{}",
-                integration.name,
-                op.name
-            );
+            let method_name = format_ident!("{}_{}", integration.name, op.name);
 
             let input_fields: Vec<TokenStream> = op
                 .input
@@ -721,7 +728,11 @@ fn generate_all_events(spec: &SystemsSpec) -> TokenStream {
     let mut seen: HashMap<String, Vec<TokenStream>> = HashMap::new();
     let mut event_order: Vec<String> = Vec::new();
 
-    for system in spec.systems.iter().filter(|s| s.mode == SystemMode::Generated) {
+    for system in spec
+        .systems
+        .iter()
+        .filter(|s| s.mode == SystemMode::Generated)
+    {
         collect_events_from_steps(&system.steps, &mut seen, &mut event_order);
     }
 
@@ -882,10 +893,8 @@ fn generate_result_struct(
                     quote! { pub #fname: Vec<#ty> }
                 }
                 Some(BindingKind::IntegrationOutput(integration, operation)) => {
-                    let ty = format_ident!(
-                        "{}Output",
-                        integration_op_pascal(integration, operation)
-                    );
+                    let ty =
+                        format_ident!("{}Output", integration_op_pascal(integration, operation));
                     quote! { pub #fname: #ty }
                 }
                 None => {
@@ -993,8 +1002,7 @@ fn steps_use_events(steps: &[Step]) -> bool {
     steps.iter().any(|s| match s {
         Step::EmitEvent(_) => true,
         Step::Branch(b) => {
-            steps_use_events(&b.then)
-                || b.otherwise.as_ref().is_some_and(|e| steps_use_events(e))
+            steps_use_events(&b.then) || b.otherwise.as_ref().is_some_and(|e| steps_use_events(e))
         }
         _ => false,
     })
@@ -1040,13 +1048,19 @@ fn generate_step(
     }
 }
 
-fn generate_load_one(step: &LoadOneStep, bindings: &mut HashMap<String, BindingKind>) -> TokenStream {
+fn generate_load_one(
+    step: &LoadOneStep,
+    bindings: &mut HashMap<String, BindingKind>,
+) -> TokenStream {
     let binding = format_ident!("{}", step.binding);
     let repo = format_ident!("Sqlx{}Repository", step.entity);
     let by_tokens = path_to_cloned_tokens(&step.by);
     let not_found = &step.not_found;
 
-    bindings.insert(step.binding.clone(), BindingKind::Entity(step.entity.clone()));
+    bindings.insert(
+        step.binding.clone(),
+        BindingKind::Entity(step.entity.clone()),
+    );
 
     quote! {
         let #binding = {
@@ -1059,7 +1073,10 @@ fn generate_load_one(step: &LoadOneStep, bindings: &mut HashMap<String, BindingK
     }
 }
 
-fn generate_load_many(step: &LoadManyStep, bindings: &mut HashMap<String, BindingKind>) -> TokenStream {
+fn generate_load_many(
+    step: &LoadManyStep,
+    bindings: &mut HashMap<String, BindingKind>,
+) -> TokenStream {
     let binding = format_ident!("{}", step.binding);
     let repo = format_ident!("Sqlx{}Repository", step.entity);
     let filter_field = &step.filter.field;

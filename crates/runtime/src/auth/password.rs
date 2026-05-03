@@ -1,6 +1,5 @@
 use argon2::{
-    Argon2,
-    PasswordHash, PasswordHasher, PasswordVerifier,
+    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
     password_hash::{SaltString, rand_core::OsRng},
 };
 

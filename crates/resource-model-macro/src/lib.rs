@@ -3,7 +3,7 @@ mod spec;
 mod validate;
 
 use proc_macro::TokenStream;
-use syn::{parse_macro_input, LitStr};
+use syn::{LitStr, parse_macro_input};
 
 fn process_yaml(yaml_str: &str) -> TokenStream {
     let spec: spec::Spec = match serde_yaml::from_str(yaml_str) {

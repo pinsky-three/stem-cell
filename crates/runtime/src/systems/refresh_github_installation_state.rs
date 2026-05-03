@@ -10,8 +10,8 @@
 //! That lets non-strict callers (e.g. webhook handlers that already carry
 //! fresh state) proceed without an App JWT; `GITHUB_APP_REFRESH_STRICT=1`
 //! forces an error instead.
-use crate::github_app::{AppClient, GithubAppError, config};
 use crate::system_api::*;
+use stem_git::github::{AppClient, GithubAppError, config};
 
 #[async_trait::async_trait]
 impl RefreshGithubInstallationStateSystem for super::AppSystems {
@@ -109,10 +109,12 @@ impl RefreshGithubInstallationStateSystem for super::AppSystems {
         }
         if !status_code.is_success() {
             let body = res.text().await.unwrap_or_default();
-            return Err(RefreshGithubInstallationStateError::GithubApiError(format!(
-                "GET /app/installations/{}: {} {}",
-                local.installation_id, status_code, body
-            )));
+            return Err(RefreshGithubInstallationStateError::GithubApiError(
+                format!(
+                    "GET /app/installations/{}: {} {}",
+                    local.installation_id, status_code, body
+                ),
+            ));
         }
 
         let body: serde_json::Value = res

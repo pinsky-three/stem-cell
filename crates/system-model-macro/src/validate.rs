@@ -8,7 +8,16 @@ fn is_safe_identifier(s: &str) -> bool {
 }
 
 const VALID_TYPES: &[&str] = &[
-    "uuid", "string", "text", "int", "bigint", "float", "bool", "timestamp", "decimal", "json",
+    "uuid",
+    "string",
+    "text",
+    "int",
+    "bigint",
+    "float",
+    "bool",
+    "timestamp",
+    "decimal",
+    "json",
 ];
 
 pub fn validate(spec: &SystemsSpec) -> Vec<String> {
@@ -42,10 +51,7 @@ fn validate_integrations<'a>(
 
     for integration in integrations {
         if !names.insert(&integration.name) {
-            errors.push(format!(
-                "duplicate integration name '{}'",
-                integration.name
-            ));
+            errors.push(format!("duplicate integration name '{}'", integration.name));
         }
         if !is_safe_identifier(&integration.name) {
             errors.push(format!(
@@ -175,11 +181,7 @@ fn validate_generated_system(
     }
 }
 
-fn validate_contract_system(
-    system: &SystemDef,
-    errors: &mut Vec<String>,
-    ctx: &str,
-) {
+fn validate_contract_system(system: &SystemDef, errors: &mut Vec<String>, ctx: &str) {
     if !system.steps.is_empty() {
         errors.push(format!(
             "{ctx}: contract-mode systems must not have 'steps'"
@@ -262,7 +264,13 @@ fn validate_steps(
                         s.filter.field
                     ));
                 }
-                validate_path(&s.filter.from, bindings, errors, ctx, "load_many.filter.from");
+                validate_path(
+                    &s.filter.from,
+                    bindings,
+                    errors,
+                    ctx,
+                    "load_many.filter.from",
+                );
                 if !is_safe_identifier(&s.binding) {
                     errors.push(format!(
                         "{ctx}: load_many binding '{}' must be alphanumeric/underscore",
@@ -303,31 +311,16 @@ fn validate_steps(
             Step::Branch(s) => {
                 validate_condition(&s.check, bindings, errors, ctx);
                 let mut branch_bindings = bindings.clone();
-                validate_steps(
-                    &s.then,
-                    &mut branch_bindings,
-                    integrations,
-                    errors,
-                    ctx,
-                );
+                validate_steps(&s.then, &mut branch_bindings, integrations, errors, ctx);
                 if let Some(ref else_steps) = s.otherwise {
                     let mut else_bindings = bindings.clone();
-                    validate_steps(
-                        else_steps,
-                        &mut else_bindings,
-                        integrations,
-                        errors,
-                        ctx,
-                    );
+                    validate_steps(else_steps, &mut else_bindings, integrations, errors, ctx);
                 }
             }
             Step::CallIntegration(s) => {
                 match integrations.get(s.integration.as_str()) {
                     None => {
-                        errors.push(format!(
-                            "{ctx}: unknown integration '{}'",
-                            s.integration
-                        ));
+                        errors.push(format!("{ctx}: unknown integration '{}'", s.integration));
                     }
                     Some(ops) => {
                         if !ops.contains_key(s.operation.as_str()) {
@@ -697,7 +690,9 @@ systems:
     result: []
 "#;
         let errs = validate(&parse(yaml));
-        assert!(errs.iter().any(|e| e.contains("needs either 'from' or 'value'")));
+        assert!(errs
+            .iter()
+            .any(|e| e.contains("needs either 'from' or 'value'")));
     }
 
     #[test]

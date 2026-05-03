@@ -5,6 +5,7 @@ edition = "2024"
 description = "Pure-logic filesystem/template/install primitives shared by the stem-cell runtime and stem CLI."
 
 [dependencies]
+stem-git = { path = "../stem-git" }
 tokio = { version = "1", features = ["process", "fs", "macros", "io-util", "time"] }
 tracing = "0.1"
 thiserror = "2"

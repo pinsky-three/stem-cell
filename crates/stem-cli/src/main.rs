@@ -38,9 +38,8 @@ async fn main() -> anyhow::Result<()> {
 fn init_tracing() {
     use tracing_subscriber::{EnvFilter, fmt};
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("stem_cli=info,opencode_client=info,warn")
-    });
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("stem_cli=info,opencode_client=info,warn"));
 
     let json = std::env::var("STEM_LOG_FORMAT")
         .map(|v| v.eq_ignore_ascii_case("json"))

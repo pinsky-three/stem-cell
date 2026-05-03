@@ -2037,28 +2037,9 @@ fn safe_relative_path(raw: &str) -> Option<std::path::PathBuf> {
 }
 
 async fn run_git_command(cwd: &std::path::Path, args: &[&str]) -> Result<(), String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .output()
+    stem_git::run_git(cwd, args)
         .await
-        .map_err(|e| format!("git spawn: {e}"))?;
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let tail: String = stderr
-        .chars()
-        .rev()
-        .take(1200)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    Err(format!("git {}: {tail}", args.join(" ")))
+        .map_err(|e| e.to_string())
 }
 
 fn sanitize_branch_component(input: &str) -> String {
@@ -2143,9 +2124,11 @@ async fn resolve_work_dir_for_project(
     .await
     .map_err(|e| format!("query deployments: {e}"))?;
 
+    let sandbox_root = stem_sandbox::SandboxRoot::temp_default();
+
     if let Some(row) = deploy_row {
         let spawn_job_id: uuid::Uuid = row.get("build_job_id");
-        let dir = std::path::PathBuf::from(format!("/tmp/stem-cell-{spawn_job_id}"));
+        let dir = sandbox_root.work_dir(&stem_sandbox::SandboxId::from_uuid(spawn_job_id));
         if dir.exists() {
             return Ok(dir);
         }
@@ -2165,7 +2148,7 @@ async fn resolve_work_dir_for_project(
 
     if let Some(row) = spawn_row {
         let spawn_id: uuid::Uuid = row.get("id");
-        let dir = std::path::PathBuf::from(format!("/tmp/stem-cell-{spawn_id}"));
+        let dir = sandbox_root.work_dir(&stem_sandbox::SandboxId::from_uuid(spawn_id));
         if dir.exists() {
             return Ok(dir);
         }

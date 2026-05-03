@@ -23,18 +23,16 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::post;
-use axum::Router;
 use serde::Serialize;
 use sqlx::PgPool;
 
-use crate::github_app::{
-    GithubAppConfig, SharedGithubAppConfig, config, verify_webhook_signature,
-};
+use crate::github_app::{GithubAppConfig, SharedGithubAppConfig, config, verify_webhook_signature};
 
 #[derive(Clone)]
 pub struct WebhookState {
@@ -114,7 +112,14 @@ async fn handle(
     let handled = match (event.as_str(), action.as_str()) {
         ("installation", "deleted") => handle_installation_deleted(&state, &payload).await,
         ("installation", "suspend") => {
-            handle_installation_lifecycle(&state, &payload, "suspended", false, "installation_suspended").await
+            handle_installation_lifecycle(
+                &state,
+                &payload,
+                "suspended",
+                false,
+                "installation_suspended",
+            )
+            .await
         }
         ("installation", "unsuspend") => {
             handle_installation_lifecycle(&state, &payload, "active", true, "connected").await
@@ -124,7 +129,9 @@ async fn handle(
         }
         // Creation is authoritative from the Setup URL, not the webhook. We
         // still log for observability.
-        ("installation", "created") => Ok("installation.created (ignored; Setup URL owns creation)"),
+        ("installation", "created") => {
+            Ok("installation.created (ignored; Setup URL owns creation)")
+        }
         ("installation_repositories", "removed") => handle_repos_removed(&state, &payload).await,
         ("installation_repositories", "added") => Ok("installation_repositories.added (observed)"),
         ("ping", _) => Ok("pong"),
@@ -132,7 +139,13 @@ async fn handle(
     };
 
     match handled {
-        Ok(tag) => Ok((StatusCode::OK, Json(WebhookResponse { ok: true, handled: tag }))),
+        Ok(tag) => Ok((
+            StatusCode::OK,
+            Json(WebhookResponse {
+                ok: true,
+                handled: tag,
+            }),
+        )),
         Err(e) => {
             tracing::error!(%event, %action, %delivery, error = %e, "webhook handler failed");
             Err((StatusCode::INTERNAL_SERVER_ERROR, e))
@@ -217,7 +230,11 @@ async fn handle_installation_lifecycle(
     .await
     .map_err(|e| e.to_string())?;
 
-    Ok(if new_active { "installation.unsuspend" } else { "installation.suspend" })
+    Ok(if new_active {
+        "installation.unsuspend"
+    } else {
+        "installation.suspend"
+    })
 }
 
 async fn handle_installation_permissions(
@@ -258,7 +275,9 @@ async fn handle_repos_removed(
     for repo in removed {
         // "full_name" is "owner/repo"
         let full = repo.get("full_name").and_then(|v| v.as_str()).unwrap_or("");
-        let Some((owner, name)) = full.split_once('/') else { continue };
+        let Some((owner, name)) = full.split_once('/') else {
+            continue;
+        };
         sqlx::query(
             "UPDATE repo_connections \
                 SET status = 'disconnected', active = false, updated_at = NOW() \

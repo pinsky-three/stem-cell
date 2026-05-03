@@ -30,9 +30,7 @@ pub async fn init_from_template(
     dest: &Path,
     template_url: Option<&str>,
 ) -> Result<TemplateOutcome> {
-    if dest.exists()
-        && !is_empty_dir(dest).await?
-    {
+    if dest.exists() && !is_empty_dir(dest).await? {
         return Err(Error::InvalidPath {
             path: dest.display().to_string(),
             reason: "destination exists and is not empty".into(),
@@ -40,7 +38,15 @@ pub async fn init_from_template(
     }
 
     let url = template_url.unwrap_or(DEFAULT_TEMPLATE_URL);
-    let path = clone_repo(url, dest, CloneOpts { progress: true, ..Default::default() }).await?;
+    let path = clone_repo(
+        url,
+        dest,
+        CloneOpts {
+            progress: true,
+            ..Default::default()
+        },
+    )
+    .await?;
 
     let manifest = ProjectManifest {
         name: name.to_string(),

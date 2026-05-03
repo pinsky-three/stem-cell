@@ -20,12 +20,18 @@ pub async fn run(args: InitArgs) -> Result<()> {
         println!("  dest:     {}", dest.display());
         println!(
             "  template: {}",
-            args.template.as_deref().unwrap_or(stem_projects::DEFAULT_TEMPLATE_URL)
+            args.template
+                .as_deref()
+                .unwrap_or(stem_projects::DEFAULT_TEMPLATE_URL)
         );
         println!("  port:     {}", args.port);
         println!(
             "  install:  {}",
-            if args.skip_install { "skipped" } else { "mise install --yes" }
+            if args.skip_install {
+                "skipped"
+            } else {
+                "mise install --yes"
+            }
         );
         return Ok(());
     }

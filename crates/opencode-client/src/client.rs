@@ -80,7 +80,7 @@ impl OpenCodeClient {
                 Err(_) => {
                     return Err(Error::HealthTimeout {
                         elapsed_ms: start.elapsed().as_millis() as u64,
-                    })
+                    });
                 }
             }
         }
@@ -211,10 +211,7 @@ impl OpenCodeClient {
     /// Useful for diagnostic logging when we suspect a shape mismatch
     /// between OpenCode's response and our `FileDiff` deserializer
     /// (e.g. an empty `path` field hinting at a rename upstream).
-    pub async fn session_diff_with_raw(
-        &self,
-        session_id: &str,
-    ) -> Result<(Vec<FileDiff>, String)> {
+    pub async fn session_diff_with_raw(&self, session_id: &str) -> Result<(Vec<FileDiff>, String)> {
         let req = self
             .http
             .get(self.url(&format!("/session/{session_id}/diff")))

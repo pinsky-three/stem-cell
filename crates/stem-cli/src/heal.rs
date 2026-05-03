@@ -33,8 +33,14 @@ pub async fn run(args: HealArgs) -> Result<()> {
     // Fast path: green on entry.
     if let Some(first_failure) = first_failing_stage(stages, &repo.root).await? {
         if args.dry_run {
-            println!("[dry-run] stage `{}` failed; would invoke OpenCode to repair.", first_failure.stage);
-            println!("────── failing output (tail) ──────\n{}", first_failure.tail);
+            println!(
+                "[dry-run] stage `{}` failed; would invoke OpenCode to repair.",
+                first_failure.stage
+            );
+            println!(
+                "────── failing output (tail) ──────\n{}",
+                first_failure.tail
+            );
             return Ok(());
         }
 
@@ -65,7 +71,9 @@ async fn heal_loop(
 
         let goal = build_repair_prompt(&failure);
         let timeout = Duration::from_secs(args.timeout_secs);
-        let outcome = agent.run_turn(&goal, Some(REPAIR_SYSTEM_SUFFIX), timeout).await?;
+        let outcome = agent
+            .run_turn(&goal, Some(REPAIR_SYSTEM_SUFFIX), timeout)
+            .await?;
         print_outcome_summary(&format!("heal attempt {attempt}"), &outcome);
 
         if outcome.diffs.is_empty() {
@@ -95,8 +103,7 @@ async fn heal_loop(
     )
 }
 
-const REPAIR_SYSTEM_SUFFIX: &str =
-    "You are in REPAIR MODE. Read the failing command output carefully, identify the \
+const REPAIR_SYSTEM_SUFFIX: &str = "You are in REPAIR MODE. Read the failing command output carefully, identify the \
      ROOT CAUSE (not just the symptom), and make the minimum edits required to make the \
      stage pass. Never disable tests, never #[allow] lints to hide errors, never mark \
      tests #[ignore]. If the fix requires editing generated or framework code, explain \

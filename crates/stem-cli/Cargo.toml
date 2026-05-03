@@ -10,7 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 opencode-client = { path = "../opencode-client" }
+stem-git = { path = "../stem-git" }
 stem-projects = { path = "../stem-projects" }
+stem-sandbox = { path = "../stem-sandbox" }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"

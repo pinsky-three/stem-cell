@@ -37,8 +37,7 @@
 //!      reacts to.
 
 use axum::{
-    Json,
-    Router,
+    Json, Router,
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
@@ -175,9 +174,7 @@ async fn status(
     let github_login = github_login_for_account(&state.pool, account.id)
         .await
         .map_err(internal)?;
-    let installations = local_installations(&state.pool)
-        .await
-        .map_err(internal)?;
+    let installations = local_installations(&state.pool).await.map_err(internal)?;
 
     Ok(Json(StatusResponse {
         configured,
@@ -207,7 +204,8 @@ async fn sync(
             synced: false,
             github_login: None,
             installation: None,
-            message: "Sign in with GitHub first so Stem Cell knows which GitHub account to sync.".into(),
+            message: "Sign in with GitHub first so Stem Cell knows which GitHub account to sync."
+                .into(),
         }));
     };
 
@@ -267,7 +265,8 @@ async fn project_persistence(
     } else if installation.is_some() {
         "GitHub App storage is ready. The next successful edit will create/connect the project repo.".to_string()
     } else if github_login.is_some() {
-        "GitHub identity is linked. Sync or install the GitHub App to persist this project.".to_string()
+        "GitHub identity is linked. Sync or install the GitHub App to persist this project."
+            .to_string()
     } else {
         "Connect GitHub in Settings to keep building and persist this project.".to_string()
     };
@@ -485,19 +484,17 @@ async fn find_app_installation_for_login(
     if !res.status().is_success() {
         let status = res.status().as_u16();
         let body = res.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("github {status}: {body}"),
-        ));
+        return Err((StatusCode::BAD_GATEWAY, format!("github {status}: {body}")));
     }
 
     let payload: Value = res
         .json()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("parse error: {e}")))?;
-    let installations = payload
-        .as_array()
-        .ok_or((StatusCode::BAD_GATEWAY, "github response was not an array".into()))?;
+    let installations = payload.as_array().ok_or((
+        StatusCode::BAD_GATEWAY,
+        "github response was not an array".into(),
+    ))?;
 
     Ok(installations.iter().find_map(|installation| {
         let login = installation
@@ -512,9 +509,7 @@ async fn find_app_installation_for_login(
     }))
 }
 
-async fn fetch_installation_payload(
-    installation_id: i64,
-) -> Result<Value, (StatusCode, String)> {
+async fn fetch_installation_payload(installation_id: i64) -> Result<Value, (StatusCode, String)> {
     let app_client =
         AppClient::new().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let url = format!("https://api.github.com/app/installations/{installation_id}");
@@ -526,10 +521,7 @@ async fn fetch_installation_payload(
     if !res.status().is_success() {
         let status = res.status().as_u16();
         let body = res.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("github {status}: {body}"),
-        ));
+        return Err((StatusCode::BAD_GATEWAY, format!("github {status}: {body}")));
     }
     res.json()
         .await

@@ -1,8 +1,8 @@
-use axum::extract::Path;
-use axum::response::sse::{Event, Sse};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use axum::Router;
+use axum::extract::Path;
+use axum::response::IntoResponse;
+use axum::response::sse::{Event, Sse};
+use axum::routing::get;
 use futures::stream::Stream;
 use opencode_client::types::BuildEvent;
 use std::convert::Infallible;
@@ -16,9 +16,7 @@ pub fn router() -> Router {
     Router::new().route("/api/projects/{project_id}/events", get(sse_handler))
 }
 
-async fn sse_handler(
-    Path(project_id): Path<uuid::Uuid>,
-) -> impl IntoResponse {
+async fn sse_handler(Path(project_id): Path<uuid::Uuid>) -> impl IntoResponse {
     let bus = event_bus();
     let rx = {
         let mut writers = bus.write().await;

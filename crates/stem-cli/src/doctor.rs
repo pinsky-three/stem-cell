@@ -95,7 +95,11 @@ fn render_pretty(r: &DoctorReport) {
     );
     println!(
         "mise           : {}",
-        if r.mise_available { "available" } else { "missing" }
+        if r.mise_available {
+            "available"
+        } else {
+            "missing"
+        }
     );
     println!(
         "opencode bin   : {}",

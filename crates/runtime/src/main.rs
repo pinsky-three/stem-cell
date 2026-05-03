@@ -13,8 +13,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
 use axum::response::IntoResponse;
+use axum::routing::get;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::services::ServeDir;
@@ -78,7 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "GitHub App configured"
         );
     } else {
-        tracing::info!("GitHub App not configured (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY[_PATH] / GITHUB_APP_WEBHOOK_SECRET)");
+        tracing::info!(
+            "GitHub App not configured (GITHUB_APP_ID / GITHUB_APP_PRIVATE_KEY[_PATH] / GITHUB_APP_WEBHOOK_SECRET)"
+        );
     }
 
     let state = AppState {

@@ -38,7 +38,11 @@ pub fn print_outcome_summary(label: &str, outcome: &crate::agent::SessionOutcome
     println!("session:  {}", outcome.session_id);
     println!(
         "state:    {}",
-        if outcome.reached_idle { "idle" } else { "timed out / aborted" }
+        if outcome.reached_idle {
+            "idle"
+        } else {
+            "timed out / aborted"
+        }
     );
     println!("files:    {changed} changed (+{additions}, -{deletions})");
 

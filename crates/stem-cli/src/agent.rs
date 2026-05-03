@@ -45,11 +45,7 @@ pub struct Agent {
 
 impl Agent {
     /// Boots an OpenCode server against `work_dir`, keyed by `project_id`.
-    pub async fn boot(
-        project_id: Uuid,
-        work_dir: &Path,
-        model: Option<String>,
-    ) -> Result<Self> {
+    pub async fn boot(project_id: Uuid, work_dir: &Path, model: Option<String>) -> Result<Self> {
         let mut config = ProcessManagerConfig::from_env();
         // CLI runs are short-lived; reap aggressively so we don't leave
         // OpenCode servers hanging if the parent is SIGKILL'd.
@@ -103,16 +99,11 @@ impl Agent {
         let auth_header = std::env::var("OPENCODE_SERVER_PASSWORD")
             .ok()
             .map(|pw| format!("Basic {}", basic_encode(&pw)));
-        let mut events = sse::subscribe(base_url, auth_header)
-            .context("opening OpenCode SSE stream")?;
+        let mut events =
+            sse::subscribe(base_url, auth_header).context("opening OpenCode SSE stream")?;
 
         self.client
-            .prompt_async(
-                &session.id,
-                parts,
-                self.model.as_deref(),
-                Some(&system),
-            )
+            .prompt_async(&session.id, parts, self.model.as_deref(), Some(&system))
             .await
             .context("sending prompt to OpenCode")?;
 

@@ -76,8 +76,8 @@ fn build_ollama_provider() -> Option<String> {
         return None;
     }
 
-    let base_url = std::env::var("OLLAMA_BASE_URL")
-        .unwrap_or_else(|_| OLLAMA_DEFAULT_BASE_URL.to_string());
+    let base_url =
+        std::env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| OLLAMA_DEFAULT_BASE_URL.to_string());
 
     let models_json = models
         .iter()
@@ -432,9 +432,12 @@ mod tests {
 
     #[test]
     fn ollama_disabled_without_models() {
-        with_env(&[("OLLAMA_MODELS", None), ("OLLAMA_BASE_URL", None)], || {
-            assert!(build_ollama_provider().is_none());
-        });
+        with_env(
+            &[("OLLAMA_MODELS", None), ("OLLAMA_BASE_URL", None)],
+            || {
+                assert!(build_ollama_provider().is_none());
+            },
+        );
     }
 
     #[test]
@@ -487,8 +490,7 @@ mod tests {
             let json = build_inline_config(&cfg).expect("inline config");
             assert!(json.contains(r#""ollama""#));
             assert!(json.contains(r#""model": "ollama/llama3.2""#));
-            let parsed: serde_json::Value =
-                serde_json::from_str(&json).expect("valid JSON");
+            let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
             assert!(parsed["provider"]["ollama"]["models"]["llama3.2"].is_object());
         });
     }

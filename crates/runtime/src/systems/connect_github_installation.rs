@@ -23,10 +23,7 @@ impl ConnectGithubInstallationSystem for super::AppSystems {
             return Err(ConnectGithubInstallationError::InvalidTargetType);
         }
 
-        let status = input
-            .status
-            .clone()
-            .unwrap_or_else(|| "active".to_string());
+        let status = input.status.clone().unwrap_or_else(|| "active".to_string());
         let active = status == "active";
 
         let org_row = sqlx::query(

@@ -65,7 +65,13 @@ fn stage_command(stage: &'static str) -> (&'static str, Vec<String>) {
             "check" => ("cargo", vec!["check".into(), "--workspace".into()]),
             "lint" => (
                 "cargo",
-                vec!["clippy".into(), "--workspace".into(), "--".into(), "-D".into(), "warnings".into()],
+                vec![
+                    "clippy".into(),
+                    "--workspace".into(),
+                    "--".into(),
+                    "-D".into(),
+                    "warnings".into(),
+                ],
             ),
             "test" => ("cargo", vec!["test".into(), "--workspace".into()]),
             other => ("cargo", vec![other.to_string()]),

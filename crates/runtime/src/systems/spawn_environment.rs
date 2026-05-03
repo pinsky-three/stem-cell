@@ -3,6 +3,7 @@ use opencode_client::types::BuildEvent;
 use sqlx::Row;
 use std::time::Duration;
 use stem_projects::astro_port_patch_snippet;
+use stem_sandbox::{ContainerNetwork, ContainerRunSpec, ProcessRunSpec, SandboxId, SandboxRoot};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tracing::Instrument;
 
@@ -92,7 +93,8 @@ fn preview_log_line_smells_fatal(line: &str) -> bool {
         || s.contains("failed to resolve")
         || s.contains("failed to load")
         || s.contains("is not recognized as an internal or external command")
-        || (s.contains("error:") && (s.contains("astro") || s.contains("vite") || s.contains("esbuild")))
+        || (s.contains("error:")
+            && (s.contains("astro") || s.contains("vite") || s.contains("esbuild")))
 }
 
 async fn publish_deploy_status(
@@ -131,17 +133,21 @@ fn preview_log_tail_for_error(log_buf: &str) -> String {
 /// Instructions embedded in OpenCode repair prompts — must match actual dev task + health URL.
 fn dev_server_repair_body(scope_raw: &str) -> &'static str {
     match effective_preview_scope(scope_raw) {
-        "full" => "\
+        "full" => {
+            "\
 The local preview runs `mise run dev` and must serve GET /healthz on the port from .mise.toml. \
 A previous attempt failed to become healthy in time. \
 Inspect the repo: fix broken dependencies, config, missing env, port binding, or startup errors so \
-`mise install` and `mise run dev` succeed. Prefer minimal changes; keep the app runnable.",
-        _ => "\
+`mise install` and `mise run dev` succeed. Prefer minimal changes; keep the app runnable."
+        }
+        _ => {
+            "\
 The host runs `mise run frontend:install` then `mise run frontend:dev` (Astro in `frontend/`). The preview must respond with HTTP 200 \
 on GET / at the port from .mise.toml. \
 A previous attempt failed to become healthy in time. \
 Inspect the repo: fix broken frontend dependencies, Astro config, missing env, port binding, or startup errors so \
-`mise install`, `mise run frontend:install`, and `mise run frontend:dev` succeed. Prefer minimal changes under `frontend/src/`; keep the preview runnable.",
+`mise install`, `mise run frontend:install`, and `mise run frontend:dev` succeed. Prefer minimal changes under `frontend/src/`; keep the preview runnable."
+        }
     }
 }
 
@@ -149,14 +155,12 @@ async fn fetch_project_scope_raw(
     pool: &sqlx::PgPool,
     project_id: uuid::Uuid,
 ) -> Result<String, String> {
-    let row = sqlx::query(
-        "SELECT scope FROM projects WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?
-    .ok_or_else(|| "project not found".to_string())?;
+    let row = sqlx::query("SELECT scope FROM projects WHERE id = $1 AND deleted_at IS NULL")
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "project not found".to_string())?;
     Ok(row.get::<String, _>("scope"))
 }
 
@@ -191,24 +195,11 @@ fn configure_unix_process_group(_cmd: &mut tokio::process::Command) {}
 
 /// After SIGTERM/SIGKILL, wait until nothing accepts this port (avoids EADDRINUSE on rapid restart).
 async fn wait_until_port_released(port: u16, timeout: Duration) {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        if tokio::time::Instant::now() > deadline {
-            tracing::warn!(%port, "timeout waiting for port to release — proceeding anyway");
-            return;
-        }
-        match tokio::net::TcpStream::connect(("localhost", port)).await {
-            Ok(_stream) => {
-                // Server still up; drop client and poll again.
-                tokio::time::sleep(Duration::from_millis(200)).await;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-                tracing::debug!(%port, "port released (connection refused)");
-                return;
-            }
-            Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
-        }
-    }
+    stem_sandbox::wait_until_port_released(port, timeout).await;
+}
+
+fn sandbox_work_dir(job_id: uuid::Uuid) -> std::path::PathBuf {
+    SandboxRoot::temp_default().work_dir(&SandboxId::from_uuid(job_id))
 }
 
 async fn kill_dev_tree(child: &mut tokio::process::Child) {
@@ -289,16 +280,12 @@ async fn append_prompt_and_queue_opencode(
     .await
     .map_err(|e| SpawnEnvironmentError::DatabaseError(e.to_string()))?;
 
-    let proj_row = sqlx::query(
-        "SELECT org_id FROM projects WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| SpawnEnvironmentError::DatabaseError(e.to_string()))?
-    .ok_or_else(|| {
-        SpawnEnvironmentError::SpawnFailed("project not found or deleted".into())
-    })?;
+    let proj_row = sqlx::query("SELECT org_id FROM projects WHERE id = $1 AND deleted_at IS NULL")
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| SpawnEnvironmentError::DatabaseError(e.to_string()))?
+        .ok_or_else(|| SpawnEnvironmentError::SpawnFailed("project not found or deleted".into()))?;
 
     let proj_org: uuid::Uuid = proj_row.get("org_id");
     if proj_org != input.org_id {
@@ -325,9 +312,7 @@ async fn append_prompt_and_queue_opencode(
     .fetch_optional(pool)
     .await
     .map_err(|e| SpawnEnvironmentError::DatabaseError(e.to_string()))?
-    .ok_or_else(|| {
-        SpawnEnvironmentError::SpawnFailed("no conversation for project".into())
-    })?;
+    .ok_or_else(|| SpawnEnvironmentError::SpawnFailed("no conversation for project".into()))?;
 
     let conversation_id: uuid::Uuid = conv_row.get("id");
     let message_id = uuid::Uuid::new_v4();
@@ -510,7 +495,13 @@ async fn create_records(
     tokio::spawn(async move {
         let started = std::time::Instant::now();
 
-        publish_deploy_status(project_id, job_id, "cloning", "Cloning template repository…").await;
+        publish_deploy_status(
+            project_id,
+            job_id,
+            "cloning",
+            "Cloning template repository…",
+        )
+        .await;
 
         let result = match tokio::time::timeout(
             CONTAINER_TIMEOUT,
@@ -562,13 +553,7 @@ async fn create_records(
             )
             .await;
 
-            trigger_opencode_build(
-                &bg_pool,
-                project_id,
-                message_id,
-                &prompt_for_opencode,
-            )
-            .await;
+            trigger_opencode_build(&bg_pool, project_id, message_id, &prompt_for_opencode).await;
         }
     });
 
@@ -611,13 +596,9 @@ async fn run_subprocess_setup(
     tracing::info!(%job_id, %repo_url, "subprocess: clone and toolchain install");
 
     let dest = std::path::PathBuf::from(work_dir);
-    let project = stem_projects::clone_repo(
-        repo_url,
-        &dest,
-        stem_projects::CloneOpts::default(),
-    )
-    .await
-    .map_err(|e| format!("clone_repo: {e}"))?;
+    let project = stem_projects::clone_repo(repo_url, &dest, stem_projects::CloneOpts::default())
+        .await
+        .map_err(|e| format!("clone_repo: {e}"))?;
 
     stem_projects::install_toolchain(
         &project,
@@ -641,10 +622,11 @@ async fn run_subprocess(
     pool: &sqlx::PgPool,
 ) -> Result<(), String> {
     let port = port_for_job(job_id);
-    let work_dir = format!("/tmp/stem-cell-{job_id}");
+    let work_dir = sandbox_work_dir(job_id);
 
     publish_deploy_status(project_id, job_id, "installing", "Installing toolchain…").await;
-    run_subprocess_setup(repo_url, job_id, &work_dir, port).await?;
+    let work_dir_str = work_dir.to_string_lossy().to_string();
+    run_subprocess_setup(repo_url, job_id, &work_dir_str, port).await?;
     publish_deploy_status(project_id, job_id, "starting", "Starting preview server…").await;
 
     let scope_raw = fetch_project_scope_raw(pool, project_id).await?;
@@ -655,14 +637,7 @@ async fn run_subprocess(
         _ => "/",
     };
 
-    let dev_script = format!(
-        "set -e && cd \"{dir}\" && export PORT={port} && \
-         MISE=$( command -v mise || echo ~/.local/bin/mise ) && \
-         {mise_chain}",
-        dir = work_dir,
-        port = port,
-        mise_chain = mise_chain,
-    );
+    let dev_script = ProcessRunSpec::new(work_dir.clone(), port, mise_chain).bash_script();
 
     let max_attempts = dev_start_max_attempts();
     tracing::info!(
@@ -874,21 +849,21 @@ async fn run_in_container(
 
     let pull_log = pull_container_base_image_logged(runtime, job_id, pool).await?;
 
+    let container_spec = ContainerRunSpec {
+        runtime: runtime.to_string(),
+        image: CONTAINER_BASE_IMAGE.to_string(),
+        memory_limit: CONTAINER_MEMORY_LIMIT.to_string(),
+        // Compatibility mode: the proxy/health checks still target localhost.
+        network: ContainerNetwork::Host,
+        port,
+        script,
+    };
+    let container_args = container_spec.docker_args();
+    let container_arg_refs: Vec<&str> = container_args.iter().map(String::as_str).collect();
+
     spawn_and_serve(
         runtime,
-        &[
-            "run",
-            "--rm",
-            // PTY tends to use line-oriented writes from apt/git; without it Docker may buffer
-            // attach output for a long time when the parent reads from a pipe.
-            "-t",
-            &format!("--memory={CONTAINER_MEMORY_LIMIT}"),
-            "--network=host",
-            CONTAINER_BASE_IMAGE,
-            "bash",
-            "-c",
-            &script,
-        ],
+        &container_arg_refs,
         job_id,
         project_id,
         port,
@@ -1467,13 +1442,7 @@ pub(super) async fn soft_reload_preview_after_opencode_build(
         "emitting soft_reload (Vite stays alive, iframe just refetches)"
     );
 
-    publish_deploy_status(
-        project_id,
-        spawn_job_id,
-        "soft_reload",
-        "Applying changes…",
-    )
-    .await;
+    publish_deploy_status(project_id, spawn_job_id, "soft_reload", "Applying changes…").await;
 }
 
 /// After OpenCode writes files, restart `mise run dev` in the checkout so the preview reloads.
@@ -1519,9 +1488,9 @@ pub(super) async fn restart_deployment_after_opencode_build(
     let old_pid: Option<i32> = row.get("pid");
     let scope_raw: String = row.get("scope");
 
-    let work_dir = format!("/tmp/stem-cell-{spawn_job_id}");
+    let work_dir = sandbox_work_dir(spawn_job_id);
     if !tokio::fs::try_exists(&work_dir).await.unwrap_or(false) {
-        tracing::warn!(%work_dir, "deploy restart: work dir missing");
+        tracing::warn!(work_dir = %work_dir.display(), "deploy restart: work dir missing");
         return;
     }
 
@@ -1571,7 +1540,7 @@ pub(super) async fn restart_deployment_after_opencode_build(
          fi && \
          $MISE trust && \
          {mise_chain}",
-        dir = work_dir,
+        dir = work_dir.display(),
         port = port,
         mise_chain = mise_chain,
     );
@@ -1653,9 +1622,7 @@ async fn restart_dev_single_attempt(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     configure_unix_process_group(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
 
     let health_url = format!("http://localhost:{port}{health_path}");
     tracing::info!(
@@ -1828,10 +1795,7 @@ async fn restart_dev_single_attempt(
         flush_logs(pool, spawn_job_id, &log_buf).await;
     }
 
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("wait: {e}"))?;
+    let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
     let tail = preview_log_tail_for_error(&log_buf);
     tracing::error!(
         %deployment_id,
@@ -2023,10 +1987,8 @@ async fn run_one_opencode_build(
             Ok(output) => return Ok(output),
             Err(e) => {
                 let err_str = format!("{e:?}");
-                let is_provider_error = matches!(
-                    &e,
-                    crate::system_api::RunBuildError::AiProviderError(_)
-                );
+                let is_provider_error =
+                    matches!(&e, crate::system_api::RunBuildError::AiProviderError(_));
                 let transient = is_provider_error && is_transient_provider_error(&err_str);
 
                 if transient && attempt < max_attempts {
@@ -2104,14 +2066,7 @@ async fn run_opencode_repair_pass(
     let prompt = format!(
         "{body}\n\n(Automated repair round {round} — preview server did not become healthy.)"
     );
-    run_one_opencode_build(
-        pool,
-        project_id,
-        message_id,
-        &prompt,
-        "opencode-repair",
-    )
-    .await?;
+    run_one_opencode_build(pool, project_id, message_id, &prompt, "opencode-repair").await?;
     Ok(())
 }
 

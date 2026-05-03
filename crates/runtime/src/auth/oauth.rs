@@ -167,8 +167,7 @@ pub async fn oauth_redirect(
     let sanitized_return = q.return_to.as_deref().and_then(sanitize_return_to);
     let csrf_state = build_oauth_state(sanitized_return.as_deref());
 
-    let mut auth_request =
-        client.authorize_url(|| CsrfToken::new(csrf_state.clone()));
+    let mut auth_request = client.authorize_url(|| CsrfToken::new(csrf_state.clone()));
     for scope in urls.scopes {
         auth_request = auth_request.add_scope(Scope::new(scope.to_string()));
     }

@@ -5,8 +5,7 @@ use std::collections::HashSet;
 fn is_safe_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 pub fn validate(spec: &Spec) -> Vec<String> {
@@ -55,8 +54,16 @@ pub fn validate(spec: &Spec) -> Vec<String> {
     }
 
     let valid_types = [
-        "uuid", "string", "text", "int", "bigint", "float", "bool",
-        "timestamp", "decimal", "json",
+        "uuid",
+        "string",
+        "text",
+        "int",
+        "bigint",
+        "float",
+        "bool",
+        "timestamp",
+        "decimal",
+        "json",
     ];
 
     for entity in &spec.entities {
@@ -153,11 +160,7 @@ pub fn validate(spec: &Spec) -> Vec<String> {
         if source_exists && target_exists {
             match rel.kind.as_str() {
                 "has_many" => {
-                    let target = spec
-                        .entities
-                        .iter()
-                        .find(|e| e.name == rel.target)
-                        .unwrap();
+                    let target = spec.entities.iter().find(|e| e.name == rel.target).unwrap();
                     let fk_exists = target.fields.iter().any(|f| f.name == rel.foreign_key);
                     if !fk_exists {
                         errors.push(format!(
@@ -167,11 +170,7 @@ pub fn validate(spec: &Spec) -> Vec<String> {
                     }
                 }
                 "belongs_to" => {
-                    let source = spec
-                        .entities
-                        .iter()
-                        .find(|e| e.name == rel.source)
-                        .unwrap();
+                    let source = spec.entities.iter().find(|e| e.name == rel.source).unwrap();
                     let fk_exists = source.fields.iter().any(|f| f.name == rel.foreign_key);
                     if !fk_exists {
                         errors.push(format!(
@@ -435,9 +434,10 @@ relations:
   - { name: "posts", kind: "has_many", source: "User", target: "Post", foreign_key: "user_id" }
 "#;
         let errs = validate(&parse(yaml));
-        assert!(errs
-            .iter()
-            .any(|e| e.contains("foreign key 'user_id' not found")));
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("foreign key 'user_id' not found"))
+        );
     }
 
     #[test]

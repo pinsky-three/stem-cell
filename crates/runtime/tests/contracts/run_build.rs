@@ -35,7 +35,10 @@ fn error_build_job_not_found_converts_to_system_error() {
     let e = RunBuildError::BuildJobNotFound;
     let se: SystemError = e.into();
     let msg = format!("{se}");
-    assert!(msg.contains("BuildJobNotFound"), "expected 'BuildJobNotFound' in '{msg}'");
+    assert!(
+        msg.contains("BuildJobNotFound"),
+        "expected 'BuildJobNotFound' in '{msg}'"
+    );
 }
 
 #[test]
@@ -43,7 +46,10 @@ fn error_project_not_found_converts_to_system_error() {
     let e = RunBuildError::ProjectNotFound;
     let se: SystemError = e.into();
     let msg = format!("{se}");
-    assert!(msg.contains("ProjectNotFound"), "expected 'ProjectNotFound' in '{msg}'");
+    assert!(
+        msg.contains("ProjectNotFound"),
+        "expected 'ProjectNotFound' in '{msg}'"
+    );
 }
 
 #[test]
@@ -51,7 +57,10 @@ fn error_ai_provider_error_converts_to_system_error() {
     let e = RunBuildError::AiProviderError("test".into());
     let se: SystemError = e.into();
     let msg = format!("{se}");
-    assert!(msg.contains("AiProviderError"), "expected 'AiProviderError' in '{msg}'");
+    assert!(
+        msg.contains("AiProviderError"),
+        "expected 'AiProviderError' in '{msg}'"
+    );
 }
 
 #[test]
@@ -59,7 +68,10 @@ fn error_build_failed_converts_to_system_error() {
     let e = RunBuildError::BuildFailed("test".into());
     let se: SystemError = e.into();
     let msg = format!("{se}");
-    assert!(msg.contains("BuildFailed"), "expected 'BuildFailed' in '{msg}'");
+    assert!(
+        msg.contains("BuildFailed"),
+        "expected 'BuildFailed' in '{msg}'"
+    );
 }
 
 // ── OpenCode types tests ────────────────────────────────────────
@@ -97,7 +109,10 @@ fn opencode_event_parse_unknown_fallback() {
 #[test]
 fn opencode_event_server_connected() {
     let event = opencode_client::OpenCodeEvent::parse("server.connected", "");
-    assert!(matches!(event, opencode_client::OpenCodeEvent::ServerConnected));
+    assert!(matches!(
+        event,
+        opencode_client::OpenCodeEvent::ServerConnected
+    ));
 }
 
 /// Hono `writeSSE({ data })` uses the default SSE event name `message`; the bus type is in JSON.

@@ -129,12 +129,14 @@ fn main() {
 }
 
 fn load_spec(path: &Path) -> Spec {
-    let yaml = fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let yaml =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("cannot parse YAML: {e}"))
 }
 
 fn load_systems_spec(path: &Path) -> SystemsSpec {
-    let yaml = fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let yaml =
+        fs::read_to_string(path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
     serde_yaml::from_str(&yaml).unwrap_or_else(|e| panic!("cannot parse systems YAML: {e}"))
 }
 
@@ -166,8 +168,7 @@ fn clean_generated_pages(dir: &Path) {
             let entry = entry.unwrap();
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "astro")
-                && fs::read_to_string(&path)
-                    .is_ok_and(|c| c.starts_with("<!-- @generated"))
+                && fs::read_to_string(&path).is_ok_and(|c| c.starts_with("<!-- @generated"))
             {
                 fs::remove_file(&path).ok();
             }

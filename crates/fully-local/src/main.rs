@@ -14,18 +14,17 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use oxibonsai_runtime::InferenceMetrics;
 use oxibonsai_runtime::engine::InferenceEngine;
 use oxibonsai_runtime::presets::SamplingPreset;
 use oxibonsai_runtime::server::{create_router_with_metrics, serve_with_shutdown, shutdown_signal};
 use oxibonsai_runtime::tokenizer_bridge::TokenizerBridge;
-use oxibonsai_runtime::tracing_setup::{init_tracing, TracingConfig};
-use oxibonsai_runtime::InferenceMetrics;
+use oxibonsai_runtime::tracing_setup::{TracingConfig, init_tracing};
 use std::sync::Arc;
 
 const MODEL_URL: &str =
     "https://huggingface.co/prism-ml/Bonsai-8B-gguf/resolve/main/Bonsai-8B.gguf";
-const TOKENIZER_URL: &str =
-    "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json";
+const TOKENIZER_URL: &str = "https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer.json";
 
 struct ServerSettings {
     model_path: String,
@@ -127,9 +126,9 @@ async fn ensure_models(settings: &ServerSettings) -> Result<()> {
         eprintln!("  Model not found at {}", model_path.display());
         eprintln!("  Downloading Bonsai-8B (~1.1 GB) …");
         eprintln!();
-        download(MODEL_URL, model_path).await.with_context(|| {
-            format!("failed to download model to {}", model_path.display())
-        })?;
+        download(MODEL_URL, model_path)
+            .await
+            .with_context(|| format!("failed to download model to {}", model_path.display()))?;
     }
 
     let tokenizer_path = models_dir.join("tokenizer.json");
@@ -138,12 +137,14 @@ async fn ensure_models(settings: &ServerSettings) -> Result<()> {
         eprintln!("  Tokenizer not found at {}", tokenizer_path.display());
         eprintln!("  Downloading Qwen3 tokenizer (~11 MB) …");
         eprintln!();
-        download(TOKENIZER_URL, &tokenizer_path).await.with_context(|| {
-            format!(
-                "failed to download tokenizer to {}",
-                tokenizer_path.display()
-            )
-        })?;
+        download(TOKENIZER_URL, &tokenizer_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to download tokenizer to {}",
+                    tokenizer_path.display()
+                )
+            })?;
     }
 
     Ok(())
@@ -164,13 +165,9 @@ async fn download(url: &str, dest: &Path) -> Result<()> {
 
     anyhow::ensure!(status.success(), "curl exited with {status}");
 
-    tokio::fs::rename(&part, dest).await.with_context(|| {
-        format!(
-            "failed to rename {} → {}",
-            part.display(),
-            dest.display()
-        )
-    })?;
+    tokio::fs::rename(&part, dest)
+        .await
+        .with_context(|| format!("failed to rename {} → {}", part.display(), dest.display()))?;
 
     Ok(())
 }
@@ -229,9 +226,7 @@ async fn main() -> Result<()> {
             )
         }
         None => {
-            tracing::warn!(
-                "no tokenizer found; /v1/chat/completions will echo raw token IDs"
-            );
+            tracing::warn!("no tokenizer found; /v1/chat/completions will echo raw token IDs");
             None
         }
     };

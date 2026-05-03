@@ -20,7 +20,7 @@
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::CookieJar;
@@ -121,11 +121,7 @@ fn redirect_to_login(uri: &Uri) -> Response {
         .path_and_query()
         .map(|pq| pq.as_str())
         .unwrap_or("/admin");
-    Redirect::to(&format!(
-        "/login?next={}",
-        urlencoding_light(next)
-    ))
-    .into_response()
+    Redirect::to(&format!("/login?next={}", urlencoding_light(next))).into_response()
 }
 
 /// Minimal percent-encoder for the `next` query param. Keeps this module free
@@ -135,15 +131,9 @@ fn urlencoding_light(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.as_bytes() {
         match *b {
-            b'A'..=b'Z'
-            | b'a'..=b'z'
-            | b'0'..=b'9'
-            | b'-'
-            | b'_'
-            | b'.'
-            | b'~'
-            | b'/'
-            | b':' => out.push(*b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' | b':' => {
+                out.push(*b as char)
+            }
             _ => out.push_str(&format!("%{:02X}", b)),
         }
     }
